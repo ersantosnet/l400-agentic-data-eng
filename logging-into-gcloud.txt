@@ -1,0 +1,27 @@
+----------------------------------------------------------------------
+-- Step 1
+----------------------------------------------------------------------
+# This needs to be an existing project with billing enabled
+export PROJECT_ID=<<REPLACE-ME>>
+
+gcloud auth login                           
+gcloud config set project $PROJECT_ID
+gcloud config set billing/quota_project $PROJECT_ID
+gcloud auth application-default login
+gcloud auth application-default set-quota-project $PROJECT_ID
+
+----------------------------------------------------------------------
+-- Step 2
+----------------------------------------------------------------------
+# Deploy terraform or ask this in AGY
+RUN ```source deploy.sh```
+
+----------------------------------------------------------------------
+-- Step 3
+----------------------------------------------------------------------
+# This is your New recently created project!
+export PROJECT_ID=<<REPLACE-ME>>
+                 
+gcloud config set project $PROJECT_ID
+gcloud config set billing/quota_project $PROJECT_ID
+gcloud auth application-default set-quota-project $PROJECT_ID

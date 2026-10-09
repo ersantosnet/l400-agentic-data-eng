@@ -1,0 +1,92 @@
+{
+  "rules": [
+    {
+      "column": "customer_id",
+      "dimension": "COMPLETENESS",
+      "nonNullExpectation": {},
+      "threshold": 1.0
+    },
+    {
+      "column": "masked_ssn",
+      "dimension": "CONFORMANCE",
+      "regexExpectation": {
+        "regex": "^[0-9a-f]{64}$"
+      },
+      "threshold": 1.0
+    },
+    {
+      "column": "masked_email",
+      "dimension": "CONFORMANCE",
+      "regexExpectation": {
+        "regex": "^[0-9a-f]{64}$"
+      },
+      "threshold": 1.0
+    },
+    {
+      "column": "loyalty_tier",
+      "dimension": "COMPLETENESS",
+      "nonNullExpectation": {},
+      "threshold": 1.0
+    },
+    {
+      "column": "payment_method",
+      "dimension": "VALIDITY",
+      "setExpectation": {
+        "values": ["0", "1", "2"]
+      },
+      "threshold": 1.0
+    },
+    {
+      "dimension": "INTEGRITY",
+      "rowConditionExpectation": {
+        "sqlExpression": "total_tx_amount > 0"
+      },
+      "threshold": 1.0
+    },
+    {
+      "dimension": "INTEGRITY",
+      "rowConditionExpectation": {
+        "sqlExpression": "total_tx_count > 0"
+      },
+      "threshold": 1.0
+    },
+    {
+      "dimension": "CONSISTENCY",
+      "rowConditionExpectation": {
+        "sqlExpression": "total_net_amount <= total_tx_amount"
+      },
+      "threshold": 1.0
+    },
+    {
+      "dimension": "CONSISTENCY",
+      "rowConditionExpectation": {
+        "sqlExpression": "high_risk_mcc_amount <= total_tx_amount"
+      },
+      "threshold": 1.0
+    },
+    {
+      "dimension": "CONSISTENCY",
+      "rowConditionExpectation": {
+        "sqlExpression": "total_disputed_amount >= 0"
+      },
+      "threshold": 1.0
+    },
+    {
+      "column": "max_geo_distance_km",
+      "dimension": "VALIDITY",
+      "rangeExpectation": {
+        "minValue": "0.0"
+      },
+      "threshold": 1.0
+    },
+    {
+      "column": "peak_velocity_1h",
+      "dimension": "VALIDITY",
+      "rangeExpectation": {
+        "minValue": "1"
+      },
+      "threshold": 1.0
+    }
+  ],
+  "samplingPercent": 100.0
+}

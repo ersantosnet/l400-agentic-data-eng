@@ -1,0 +1,150 @@
+{
+  "test_suites": [
+    {
+      "suite_id": "foundations_and_infra_suite",
+      "design_ref": "docs/design/DESIGN-01-foundations-and-infra.md",
+      "cases": [
+        {
+          "test_id": "test_gcs_buckets_exist",
+          "description": "Verify required storage buckets exist in us-central1",
+          "target_resources": [
+            "acme-l400-part3-eri-01-raw-landing",
+            "acme-l400-part3-eri-01-lakehouse-warehouse",
+            "acme-l400-part3-eri-01-spark-event-logs"
+          ],
+          "expected_status": "EXISTS"
+        },
+        {
+          "test_id": "test_biglake_catalogs_exist",
+          "description": "Verify Bronze and Silver BigLake Iceberg REST catalogs exist",
+          "target_catalogs": [
+            "acme_bronze_dev",
+            "acme_silver_dev"
+          ],
+          "expected_status": "ACTIVE"
+        },
+        {
+          "test_id": "test_bigquery_vending_connection",
+          "description": "Verify Cloud Resource connection for credential vending",
+          "connection_name": "projects/acme-l400-part3-eri-01/locations/us-central1/connections/lakehouse-vending-conn",
+          "expected_status": "ACTIVE"
+        }
+      ]
+    },
+    {
+      "suite_id": "bronze_layer_suite",
+      "design_ref": "docs/design/DESIGN-02-data-layer.md",
+      "cases": [
+        {
+          "test_id": "test_bronze_table_row_counts",
+          "description": "Verify lossless 1:1 row counts in Bronze Iceberg tables",
+          "expected_counts": {
+            "customers_crm_bronze": 510000,
+            "merchants_stores_bronze": 26000,
+            "device_auth_logs_bronze": 4120000,
+            "payment_transactions_bronze": 10490000,
+            "chargeback_disputes_bronze": 360500,
+            "total_bronze_rows": 15506500
+          }
+        },
+        {
+          "test_id": "test_bronze_ssn_policy_tag",
+          "description": "Verify Dataplex Policy Tag SSN_Cardholder attached to Bronze SSN columns",
+          "targets": [
+            "customers_crm_bronze.ssn",
+            "payment_transactions_bronze.ssn"
+          ],
+          "expected_policy_tag": "SSN_Cardholder",
+          "expected_masking_rule": "SHA256"
+        }
+      ]
+    },
+    {
+      "suite_id": "silver_layer_suite",
+      "design_ref": "docs/design/DESIGN-02-data-layer.md",
+      "cases": [
+        {
+          "test_id": "test_silver_clean_row_counts",
+          "description": "Verify exact clean unique row counts in Silver Iceberg tables",
+          "expected_counts": {
+            "customers_crm_silver": 500000,
+            "merchants_stores_silver": 25000,
+            "device_auth_logs_silver": 4000000,
+            "payment_transactions_silver": 10000000,
+            "chargeback_disputes_silver": 350000,
+            "total_silver_rows": 14875000
+          }
+        },
+        {
+          "test_id": "test_silver_pii_dropped",
+          "description": "Ensure cleartext ssn and email columns are completely dropped from Silver",
+          "forbidden_columns": ["ssn", "email"],
+          "tables": ["customers_crm_silver", "payment_transactions_silver"]
+        },
+        {
+          "test_id": "test_silver_accounting_parentheses",
+          "description": "Verify accounting parentheses ($x) were reversed to negative values",
+          "expected_negative_values": true
+        }
+      ]
+    },
+    {
+      "suite_id": "gold_layer_suite",
+      "design_ref": "docs/design/DESIGN-03-analytics-and-ml.md",
+      "cases": [
+        {
+          "test_id": "test_gold_row_count_and_grain",
+          "description": "Verify curated customer-payment feature grain and total rows",
+          "target_table": "fraud_features_gold.gold_fraud_features",
+          "expected_row_count": 518638,
+          "expected_distinct_customers": 233945
+        },
+        {
+          "test_id": "test_financial_reconciliation_zero_variance",
+          "description": "Verify penny-exact reconciliation across Credit, Debit, and Mobile Wallet",
+          "expected_totals": {
+            "total_tx_count": 10000000,
+            "gross_amount": "8069098864.39",
+            "net_amount": "8059136414.39",
+            "disputed_amount": "598467476.02",
+            "credit_gross": "2434254756.10",
+            "debit_gross": "2439184262.09",
+            "wallet_gross": "3195659846.20"
+          },
+          "max_allowed_variance": 0.00
+        }
+      ]
+    },
+    {
+      "suite_id": "governance_and_orchestration_suite",
+      "design_ref": "docs/design/DESIGN-04-application-layer.md",
+      "cases": [
+        {
+          "test_id": "test_kc_domain_and_product",
+          "description": "Verify Data Mesh FraudDomain and FraudRiskFeatureStore product",
+          "domain": "FraudDomain",
+          "data_product": "FraudRiskFeatureStore",
+          "expected_aspect": "medallion-governance-template",
+          "expected_entry_count": 11
+        },
+        {
+          "test_id": "test_dataplex_dq_scan",
+          "description": "Verify Auto Data Quality Scan fraud-gold-dq-scan-dev passes 100%",
+          "scan_id": "fraud-gold-dq-scan-dev",
+          "expected_pass_rate": 1.0
+        },
+        {
+          "test_id": "test_dag_parse_validity",
+          "description": "Verify medallion_lakehouse_dag.py syntax and task graph",
+          "dag_id": "acme_medallion_lakehouse_hourly",
+          "expected_tasks": [
+            "bronze_ingest_spark",
+            "silver_cleanse_nqe",
+            "gold_dbt_feature_mart",
+            "apply_kc_governance"
+          ]
+        }
+      ]
+    }
+  ]
+}

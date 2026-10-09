@@ -1,0 +1,23 @@
+# [PROJECT_NAME] - System Architecture & Context
+> **INSTRUCTIONS FOR AI AGENTS:** This file is currently a template. Your first task in a new project is to read the raw customer requirements located in `docs/requirements/` and completely overwrite this file with the actual business and technical context of the new system. Remove this instruction block once completed.
+
+## 1. Project Overview & Business Value
+- **Customer / Project Name:** [Fill in from requirements]
+- **Business Goal:** [What is the customer trying to achieve? e.g., "Reduce ML model training time" or "Build a real-time fraud detection pipeline"]
+- **Primary Users:** [Who will use this system? e.g., Data Scientists, external customers, internal BI team]
+
+## 2. Infrastructure Topology (GCP Services Used)
+[List the Google Cloud services that will be provisioned by Terraform in this solution. Example:]
+- **Storage:** [e.g., Cloud Storage, BigQuery]
+- **Compute / Processing:** [e.g., Cloud Run, Dataflow, Dataproc]
+- **AI / ML:** [e.g., Vertex AI, Gemini API, Colab Enterprise]
+- **Networking:** [e.g., Shared VPC, Cloud NAT]
+
+## 3. Core Data Flow & Schemas
+[Describe how data moves through the system. Detail the major data models.]
+1. **Ingestion:** [Where does the data come from? e.g., "Pub/Sub stream from on-prem Kafka"]
+2. **Processing:** [How is it transformed? e.g., "Dataflow job cleaning JSON payloads"]
+3. **Storage:** [Where does it land? e.g., "BigQuery dataset `raw_events`"]
+- **Primary Data Shape (Example):**
+  ```json
+  // [Insert core payload JSON or schema definition here so agents know the data structure]

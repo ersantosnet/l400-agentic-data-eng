@@ -1,0 +1,19 @@
+{
+    "description-of-this-file" : "This file is used to configure the agent (AGY).  It will get updated after each Terraform deploy.  You can add values to the file.",
+
+    "random_string" : "{random_string}",
+
+    "gcp-project-id" : "{project_id}",
+
+    "bigquery-region" : "{multi_region}",
+    "bigquery-dataset" : "l400_agentic_se",
+    
+    "knowledge-catalog-region" : "us-central1",
+
+    "data-profile-region" : "us-central1",
+
+    "business-glossary-region" : "global",
+    "business-glossary-id" : "{project_id}",
+
+    "data-bucket" : "l400-agentic-se-data-{random_string}"
+}

@@ -1,0 +1,54 @@
+{
+  "name": "medallion-governance-template",
+  "type": "record",
+  "recordFields": [
+    {
+      "name": "data_steward",
+      "type": "string",
+      "index": 1,
+      "constraints": {
+        "required": true
+      }
+    },
+    {
+      "name": "pii_classification",
+      "type": "string",
+      "index": 2,
+      "constraints": {
+        "required": true
+      }
+    },
+    {
+      "name": "medallion_tier",
+      "type": "string",
+      "index": 3,
+      "constraints": {
+        "required": true
+      }
+    },
+    {
+      "name": "sla_freshness_hours",
+      "type": "int",
+      "index": 4,
+      "constraints": {
+        "required": true
+      }
+    },
+    {
+      "name": "lifecycle_env",
+      "type": "string",
+      "index": 5,
+      "constraints": {
+        "required": true
+      }
+    },
+    {
+      "name": "ssn_masked",
+      "type": "bool",
+      "index": 6,
+      "constraints": {
+        "required": true
+      }
+    }
+  ]
+}
