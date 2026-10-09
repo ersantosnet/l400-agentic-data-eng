@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - diagnostic_telemetry_seeding
-Queries and verifies baseline seeding for diagnostic telemetry tables.
-Supports both Automatic submission (local proxy) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part1 - remediated_serverless_batch
+Fetches Dataproc Serverless batch execution telemetry for orders_enrichment_fixed.py.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
 import json
 import uuid
@@ -17,8 +18,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "diagnostic_telemetry_seeding"
+LAB = "L400-da-data-engineering-part1"
+EVAL_NAME = "remediated_serverless_batch"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -109,21 +110,48 @@ def get_student_identity() -> tuple[str, str]:
     return account, student_ldap
 
 
-def get_gcp_context():
-    """Reads project and dataset configurations from agent-config.json or gcloud."""
-    project_id = ""
-    dataset = ""
-    region = ""
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
 
-    if os.path.exists("agent-config.json"):
-        try:
-            with open("agent-config.json", "r") as f:
-                cfg = json.load(f)
-                project_id = cfg.get("gcp-project-id", "")
-                dataset = cfg.get("bigquery-dataset", "")
-                region = cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
-        except Exception:
-            pass
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
 
     if not project_id or project_id == "null":
         try:
@@ -133,7 +161,7 @@ def get_gcp_context():
         except Exception:
             pass
 
-    return project_id, dataset, region
+    return project_id, dataset, region or "us-central1"
 
 
 def safe_json_loads(text: str, default=None):
@@ -211,11 +239,11 @@ def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="lab"',
         b"",
-        f"L400-agentic-solution-eng".encode("utf-8"),
+        LAB.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="evaluation"',
         b"",
-        f"diagnostic_telemetry_seeding".encode("utf-8"),
+        EVAL_NAME.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         f'Content-Disposition: form-data; name="files"; filename="{filename}"'.encode("utf-8"),
         b"Content-Type: application/zip",
@@ -271,47 +299,40 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Queries diagnostic telemetry baseline tables."""
-    project_id, dataset, _ = get_gcp_context()
-    dataset = dataset or "l400_agentic_se"
+    """Fetches Dataproc Serverless batches and filters remediated batch telemetry."""
+    project_id, _, region = get_gcp_context()
     if not project_id:
         print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
 
-    print(f"Querying diagnostic telemetry tables in {project_id}:{dataset}...")
-    def run_query(sql):
-        cmd = ["bq", "query", "--use_legacy_sql=false", "--format=prettyjson", sql]
-        p = subprocess.run(cmd, capture_output=True, text=True)
-        if p.returncode == 0:
-            try:
-                return safe_json_loads(p.stdout, {"error": p.stderr.strip() or "Query failed"}) if (p.returncode == 0 and p.stdout.strip()) else {"error": p.stderr.strip() or "Query failed"}
-            except Exception:
-                return {"raw": p.stdout}
-        return {"error": p.stderr.strip() or "Query failed"}
+    print(f"Fetching Dataproc Serverless batches in {region} for project: {project_id}...")
+    p = subprocess.run(
+        ["gcloud", "dataproc", "batches", "list", f"--project={project_id}", f"--region={region}", "--format=json"],
+        capture_output=True,
+        text=True,
+        timeout=45
+    )
 
-    summary = {
-        "inventory_levels": run_query(f"""
-            SELECT 
-              COUNT(*) as total_rows, 
-              COUNT(DISTINCT product_sku) as distinct_skus,
-              MIN(stock_available) as min_stock,
-              MAX(stock_available) as max_stock,
-              ARRAY_AGG(DISTINCT warehouse_region) as warehouses
-            FROM `{project_id}.{dataset}.inventory_levels`
-        """),
-        "gtm_tag_health": run_query(f"""
-            SELECT 
-              COUNT(*) as total_rows,
-              ARRAY_AGG(DISTINCT firing_status) as distinct_statuses
-            FROM `{project_id}.{dataset}.gtm_tag_health`
-        """),
-        "web_access_logs": run_query(f"""
-            SELECT 
-              COUNT(*) as total_rows,
-              ROUND(SAFE_DIVIDE(COUNTIF(status_code = 200), COUNT(*)) * 100, 2) as http_200_pct,
-              ROUND(AVG(latency_ms), 2) as avg_latency_ms
-            FROM `{project_id}.{dataset}.web_access_logs`
-        """)
+    all_batches = safe_json_loads(p.stdout, []) if (p.returncode == 0 and p.stdout.strip()) else []
+    remediated_batches = []
+    if isinstance(all_batches, list):
+        for b in all_batches:
+            if not isinstance(b, dict):
+                continue
+            pyspark_batch = b.get("pysparkBatch") or {}
+            main_file = pyspark_batch.get("mainPythonFileUri", "")
+            batch_name = b.get("name", "")
+            if "orders_enrichment_fixed.py" in main_file or "remediated" in batch_name or "fixed" in batch_name:
+                remediated_batches.append(b)
+
+    payload = {
+        "project_id": project_id,
+        "region": region,
+        "batches_count": len(all_batches) if isinstance(all_batches, list) else 0,
+        "remediated_batches_count": len(remediated_batches),
+        "remediated_batches": remediated_batches,
+        "all_batches": all_batches,
+        "error": p.stderr.strip() if p.returncode != 0 else None,
     }
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -328,7 +349,8 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        z.writestr("diagnostic_telemetry_summary.json", json.dumps(summary, indent=2))
+        z.writestr("dataproc_batches.json", json.dumps(all_batches, indent=2))
+        z.writestr("remediated_batches.json", json.dumps(payload, indent=2))
 
     return created_at, signature
 
@@ -338,7 +360,7 @@ def main():
     zip_path = os.path.join(script_dir, ZIP_FILENAME)
 
     print("=======================================================")
-    print(f" Lab Evaluation: L400-agentic-solution-eng - diagnostic_telemetry_seeding")
+    print(f" Lab Evaluation: {LAB} - {EVAL_NAME}")
     print("=======================================================")
 
     student_account, student_ldap = get_student_identity()

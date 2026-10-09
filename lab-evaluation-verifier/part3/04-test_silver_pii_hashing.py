@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - bigquery_schemas
-Extracts live BigQuery schema definitions for solution tables.
-Supports both Automatic submission (local proxy) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part3 - silver_pii_hashing
+Verifies plaintext PII removal (ssn, email), 64-char SHA-256 hex format (masked_ssn, masked_email),
+and deterministic spot check for CUST-0000001 across customers_crm_silver and payment_transactions_silver.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
 import json
 import uuid
@@ -17,8 +19,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "bigquery_schemas"
+LAB = "L400-da-data-engineering-part3"
+EVAL_NAME = "silver_pii_hashing"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -56,12 +58,8 @@ def is_service_account(acc: str) -> bool:
 
 
 def get_student_identity() -> tuple[str, str]:
-    """Discovers active gcloud account and extracts LDAP identity.
-    Filters out machine/VM service accounts (such as Cloudtop shared service accounts)
-    and prioritizes authenticated human accounts (@google.com or @*.altostrat.com).
-    """
+    """Discovers active gcloud account and extracts LDAP identity."""
     account = ""
-    # 1. Check if active gcloud account is a human user
     try:
         result = subprocess.run(
             ["gcloud", "config", "get-value", "account"],
@@ -76,8 +74,6 @@ def get_student_identity() -> tuple[str, str]:
     except Exception:
         pass
 
-    # 2. If active account is missing or a service account (e.g. Cloudtop VM service account),
-    # search credentialed accounts in gcloud auth list
     if not account:
         try:
             out = subprocess.run(["gcloud", "auth", "list", "--format=json"], capture_output=True, text=True, timeout=5)
@@ -97,7 +93,6 @@ def get_student_identity() -> tuple[str, str]:
         except Exception:
             pass
 
-    # 3. Fallback to OS USER environment variable (corporate LDAP on Cloudtop/macOS)
     if not account:
         os_user = os.environ.get("USER", "").strip()
         if os_user and not is_service_account(os_user):
@@ -109,21 +104,48 @@ def get_student_identity() -> tuple[str, str]:
     return account, student_ldap
 
 
-def get_gcp_context():
-    """Reads project and dataset configurations from agent-config.json or gcloud."""
-    project_id = ""
-    dataset = ""
-    region = ""
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
 
-    if os.path.exists("agent-config.json"):
-        try:
-            with open("agent-config.json", "r") as f:
-                cfg = json.load(f)
-                project_id = cfg.get("gcp-project-id", "")
-                dataset = cfg.get("bigquery-dataset", "")
-                region = cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
-        except Exception:
-            pass
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
 
     if not project_id or project_id == "null":
         try:
@@ -133,7 +155,7 @@ def get_gcp_context():
         except Exception:
             pass
 
-    return project_id, dataset, region
+    return project_id, dataset or "fraud_detection_db", region or "us-central1"
 
 
 def safe_json_loads(text: str, default=None):
@@ -153,12 +175,7 @@ def calculate_signature(student_ldap: str, lab: str, evaluation: str, created_at
 
 
 def get_identity_token() -> tuple[str, str]:
-    """Retrieves Google identity token for authenticating directly against Cloud Run.
-    Explicitly prioritizes an authenticated @google.com account so Cloud Run invoker
-    permissions succeed even when an Argolis/lab account is the active gcloud account.
-    Returns (token, account_used).
-    """
-    # 1. Search gcloud auth list for an authenticated @google.com account
+    """Retrieves Google identity token for authenticating directly against Cloud Run."""
     try:
         out = subprocess.run(["gcloud", "auth", "list", "--format=json"], capture_output=True, text=True, timeout=5)
         if out.returncode == 0:
@@ -176,7 +193,6 @@ def get_identity_token() -> tuple[str, str]:
     except Exception:
         pass
 
-    # 2. Fallback to active gcloud account
     try:
         res = subprocess.run(
             ["gcloud", "auth", "print-identity-token"],
@@ -199,6 +215,15 @@ def get_identity_token() -> tuple[str, str]:
     return "", ""
 
 
+def run_bq_query(project_id: str, sql: str):
+    """Runs a BigQuery SQL query and returns parsed JSON rows or error dict."""
+    cmd = ["bq", "query", f"--project_id={project_id}", "--use_legacy_sql=false", "--format=prettyjson", sql]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode == 0 and p.stdout.strip():
+        return safe_json_loads(p.stdout, {"error": p.stderr.strip() or "Query failed"})
+    return {"error": (p.stderr or p.stdout or "Query failed").strip()}
+
+
 def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
     """Submits the zip bundle to the Cloud Run validator endpoint."""
     boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
@@ -211,11 +236,11 @@ def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="lab"',
         b"",
-        f"L400-agentic-solution-eng".encode("utf-8"),
+        LAB.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="evaluation"',
         b"",
-        f"bigquery_schemas".encode("utf-8"),
+        EVAL_NAME.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         f'Content-Disposition: form-data; name="files"; filename="{filename}"'.encode("utf-8"),
         b"Content-Type: application/zip",
@@ -271,32 +296,63 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Extracts live BigQuery schemas for the solution tables."""
-    project_id, dataset, _ = get_gcp_context()
-    dataset = dataset or "l400_agentic_se"
+    """Queries Silver PII hashing columns, regex match counts, and CUST-0000001 spot check."""
+    project_id, dataset, region = get_gcp_context()
+    dataset = "fraud_detection_db"
     if not project_id:
         print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
 
-    print(f"Extracting live table metadata for dataset: {project_id}:{dataset}...")
-    tables = [
-        "p_ads_CampaignBasicStats",
-        "live_conversions_stream",
-        "web_access_logs",
-        "inventory_levels",
-        "gtm_tag_health"
-    ]
-    results = {}
-    for t in tables:
-        cmd = ["bq", "show", "--format=prettyjson", f"{project_id}:{dataset}.{t}"]
-        p = subprocess.run(cmd, capture_output=True, text=True)
-        if p.returncode == 0:
-            try:
-                results[t] = safe_json_loads(p.stdout, {"error": p.stderr.strip() or "Query failed"}) if (p.returncode == 0 and p.stdout.strip()) else {"error": p.stderr.strip() or "Query failed"}
-            except Exception:
-                results[t] = {"raw": p.stdout}
-        else:
-            results[t] = {"error": p.stderr.strip() or "Not found"}
+    print(f"Checking Silver SHA-256 PII hashing in {project_id}:{dataset}...")
+    tables_info = {}
+
+    for dom in ("customers_crm", "payment_transactions"):
+        tbl = f"{dom}_silver"
+        show_proc = subprocess.run(
+            ["bq", "show", "--format=prettyjson", f"{project_id}:{dataset}.{tbl}"],
+            capture_output=True,
+            text=True
+        )
+        if show_proc.returncode != 0 or not show_proc.stdout.strip():
+            tables_info[tbl] = {
+                "exists": False,
+                "error": (show_proc.stderr or show_proc.stdout or "Table not found").strip(),
+            }
+            continue
+
+        meta = safe_json_loads(show_proc.stdout, {})
+        cols = [f.get("name") for f in meta.get("schema", {}).get("fields", []) if isinstance(f, dict)]
+        ssn_expr = "COUNTIF(REGEXP_CONTAINS(masked_ssn, r'^[0-9a-f]{64}$'))" if "masked_ssn" in cols else "-1"
+        email_expr = "COUNTIF(REGEXP_CONTAINS(masked_email, r'^[0-9a-f]{64}$'))" if "masked_email" in cols else "-1"
+
+        sql = f"""
+        SELECT
+          COUNT(*) AS total_rows,
+          {ssn_expr} AS valid_ssn_cnt,
+          {email_expr} AS valid_email_cnt
+        FROM `{project_id}.{dataset}.{tbl}`
+        """
+        q_res = run_bq_query(project_id, sql)
+        tables_info[tbl] = {
+            "exists": True,
+            "columns": cols,
+            "plaintext_ssn_present": "ssn" in cols,
+            "plaintext_email_present": "email" in cols,
+            "hash_format_counts": q_res,
+        }
+
+    spot_check = {}
+    if tables_info.get("customers_crm_silver", {}).get("exists") and "masked_ssn" in tables_info["customers_crm_silver"].get("columns", []):
+        spot_sql = f"SELECT customer_id, masked_ssn FROM `{project_id}.{dataset}.customers_crm_silver` WHERE customer_id = 'CUST-0000001' LIMIT 1"
+        spot_check = run_bq_query(project_id, spot_sql)
+
+    telemetry = {
+        "project_id": project_id,
+        "dataset": dataset,
+        "region": region,
+        "tables": tables_info,
+        "cust_0000001_spot_check": spot_check,
+    }
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     signature = calculate_signature(student_ldap, LAB, EVAL_NAME, created_at, SALT)
@@ -312,7 +368,7 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        z.writestr("bigquery_tables_schemas.json", json.dumps(results, indent=2))
+        z.writestr("silver_pii_hashing.json", json.dumps(telemetry, indent=2))
 
     return created_at, signature
 
@@ -322,7 +378,7 @@ def main():
     zip_path = os.path.join(script_dir, ZIP_FILENAME)
 
     print("=======================================================")
-    print(f" Lab Evaluation: L400-agentic-solution-eng - bigquery_schemas")
+    print(f" Lab Evaluation: {LAB} - {EVAL_NAME}")
     print("=======================================================")
 
     student_account, student_ldap = get_student_identity()

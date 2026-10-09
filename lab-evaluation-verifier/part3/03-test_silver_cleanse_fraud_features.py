@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - pubsub_pipeline
-Fetches Pub/Sub hotpath topic and BigQuery subscription details.
-Supports both Automatic submission (local proxy) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part3 - silver_cleanse_fraud_features
+Queries the 5 Silver Iceberg V2 tables in fraud_detection_db for row counts, Class N4 benign nulls,
+golden primary/secondary sums, Haversine distance/velocity features, and DEV-FRAUD-999 fraud ring count.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
 import json
 import uuid
@@ -17,14 +19,47 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "pubsub_pipeline"
+LAB = "L400-da-data-engineering-part3"
+EVAL_NAME = "silver_cleanse_fraud_features"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
     os.environ.get("URL", "https://lab-evaluation-verifier-verify-463617135523.us-central1.run.app")
 )
 SALT = os.environ.get("EVAL_SIGNATURE_SALT", "argolis-eval-verifier-salt-2026")
+
+SILVER_TABLE_SPECS = {
+    "customers_crm": {
+        "primary_col": "credit_limit_usd",
+        "secondary_col": "reward_points",
+        "secondary_is_int": True,
+        "n4_expr": "phone IS NULL OR loyalty_tier IS NULL",
+    },
+    "merchants_stores": {
+        "primary_col": "terminal_monthly_fee_usd",
+        "secondary_col": "commission_rate_pct",
+        "secondary_is_int": False,
+        "n4_expr": "store_manager_code IS NULL OR region_notes IS NULL",
+    },
+    "device_auth_logs": {
+        "primary_col": "auth_latency_ms",
+        "secondary_col": "risk_score_raw",
+        "secondary_is_int": False,
+        "n4_expr": "user_agent IS NULL OR mfa_method IS NULL",
+    },
+    "payment_transactions": {
+        "primary_col": "tx_amount",
+        "secondary_col": "net_amount_after_discount",
+        "secondary_is_int": False,
+        "n4_expr": "device_ip IS NULL OR promo_code IS NULL",
+    },
+    "chargeback_disputes": {
+        "primary_col": "dispute_amount",
+        "secondary_col": "penalty_fee_usd",
+        "secondary_is_int": False,
+        "n4_expr": "customer_statement IS NULL OR agent_notes IS NULL",
+    },
+}
 
 
 def extract_ldap(account_str: str) -> str:
@@ -56,12 +91,8 @@ def is_service_account(acc: str) -> bool:
 
 
 def get_student_identity() -> tuple[str, str]:
-    """Discovers active gcloud account and extracts LDAP identity.
-    Filters out machine/VM service accounts (such as Cloudtop shared service accounts)
-    and prioritizes authenticated human accounts (@google.com or @*.altostrat.com).
-    """
+    """Discovers active gcloud account and extracts LDAP identity."""
     account = ""
-    # 1. Check if active gcloud account is a human user
     try:
         result = subprocess.run(
             ["gcloud", "config", "get-value", "account"],
@@ -76,8 +107,6 @@ def get_student_identity() -> tuple[str, str]:
     except Exception:
         pass
 
-    # 2. If active account is missing or a service account (e.g. Cloudtop VM service account),
-    # search credentialed accounts in gcloud auth list
     if not account:
         try:
             out = subprocess.run(["gcloud", "auth", "list", "--format=json"], capture_output=True, text=True, timeout=5)
@@ -97,7 +126,6 @@ def get_student_identity() -> tuple[str, str]:
         except Exception:
             pass
 
-    # 3. Fallback to OS USER environment variable (corporate LDAP on Cloudtop/macOS)
     if not account:
         os_user = os.environ.get("USER", "").strip()
         if os_user and not is_service_account(os_user):
@@ -109,21 +137,48 @@ def get_student_identity() -> tuple[str, str]:
     return account, student_ldap
 
 
-def get_gcp_context():
-    """Reads project and dataset configurations from agent-config.json or gcloud."""
-    project_id = ""
-    dataset = ""
-    region = ""
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
 
-    if os.path.exists("agent-config.json"):
-        try:
-            with open("agent-config.json", "r") as f:
-                cfg = json.load(f)
-                project_id = cfg.get("gcp-project-id", "")
-                dataset = cfg.get("bigquery-dataset", "")
-                region = cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
-        except Exception:
-            pass
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
 
     if not project_id or project_id == "null":
         try:
@@ -133,7 +188,7 @@ def get_gcp_context():
         except Exception:
             pass
 
-    return project_id, dataset, region
+    return project_id, dataset or "fraud_detection_db", region or "us-central1"
 
 
 def safe_json_loads(text: str, default=None):
@@ -153,12 +208,7 @@ def calculate_signature(student_ldap: str, lab: str, evaluation: str, created_at
 
 
 def get_identity_token() -> tuple[str, str]:
-    """Retrieves Google identity token for authenticating directly against Cloud Run.
-    Explicitly prioritizes an authenticated @google.com account so Cloud Run invoker
-    permissions succeed even when an Argolis/lab account is the active gcloud account.
-    Returns (token, account_used).
-    """
-    # 1. Search gcloud auth list for an authenticated @google.com account
+    """Retrieves Google identity token for authenticating directly against Cloud Run."""
     try:
         out = subprocess.run(["gcloud", "auth", "list", "--format=json"], capture_output=True, text=True, timeout=5)
         if out.returncode == 0:
@@ -176,7 +226,6 @@ def get_identity_token() -> tuple[str, str]:
     except Exception:
         pass
 
-    # 2. Fallback to active gcloud account
     try:
         res = subprocess.run(
             ["gcloud", "auth", "print-identity-token"],
@@ -199,6 +248,15 @@ def get_identity_token() -> tuple[str, str]:
     return "", ""
 
 
+def run_bq_query(project_id: str, sql: str):
+    """Runs a BigQuery SQL query and returns parsed JSON rows or error dict."""
+    cmd = ["bq", "query", f"--project_id={project_id}", "--use_legacy_sql=false", "--format=prettyjson", sql]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode == 0 and p.stdout.strip():
+        return safe_json_loads(p.stdout, {"error": p.stderr.strip() or "Query failed"})
+    return {"error": (p.stderr or p.stdout or "Query failed").strip()}
+
+
 def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
     """Submits the zip bundle to the Cloud Run validator endpoint."""
     boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
@@ -211,11 +269,11 @@ def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="lab"',
         b"",
-        f"L400-agentic-solution-eng".encode("utf-8"),
+        LAB.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="evaluation"',
         b"",
-        f"pubsub_pipeline".encode("utf-8"),
+        EVAL_NAME.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         f'Content-Disposition: form-data; name="files"; filename="{filename}"'.encode("utf-8"),
         b"Content-Type: application/zip",
@@ -271,19 +329,67 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Fetches Pub/Sub topic and subscription details."""
-    project_id, _, _ = get_gcp_context()
+    """Queries all 5 Silver tables for row counts, N4 nulls, primary/secondary sums, and fraud features."""
+    project_id, dataset, region = get_gcp_context()
+    dataset = "fraud_detection_db"
     if not project_id:
         print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
 
-    print(f"Fetching Pub/Sub topic and subscription details for project: {project_id}...")
-    t_res = subprocess.run(["gcloud", "pubsub", "topics", "describe", "ads-conversions-hotpath", f"--project={project_id}", "--format=json"], capture_output=True, text=True)
-    s_res = subprocess.run(["gcloud", "pubsub", "subscriptions", "describe", "ads-conversions-bq-sub", f"--project={project_id}", "--format=json"], capture_output=True, text=True)
+    print(f"Querying 5 Silver tables in {project_id}:{dataset}...")
+    silver_results = {}
 
-    data = {
-        "topic": safe_json_loads(t_res.stdout, {"error": t_res.stderr.strip() or "Not found"}) if (t_res.returncode == 0 and t_res.stdout.strip()) else {"error": t_res.stderr.strip() or "Not found"},
-        "subscription": safe_json_loads(s_res.stdout, {"error": s_res.stderr.strip() or "Not found"}) if (s_res.returncode == 0 and s_res.stdout.strip()) else {"error": s_res.stderr.strip() or "Not found"}
+    for dom, spec in SILVER_TABLE_SPECS.items():
+        tbl = f"{dom}_silver"
+        show_proc = subprocess.run(
+            ["bq", "show", "--format=prettyjson", f"{project_id}:{dataset}.{tbl}"],
+            capture_output=True,
+            text=True
+        )
+        if show_proc.returncode != 0 or not show_proc.stdout.strip():
+            silver_results[tbl] = {
+                "exists": False,
+                "error": (show_proc.stderr or show_proc.stdout or "Table not found").strip(),
+            }
+            continue
+
+        meta = safe_json_loads(show_proc.stdout, {})
+        cols = [f.get("name") for f in meta.get("schema", {}).get("fields", []) if isinstance(f, dict)]
+        p_col = spec["primary_col"]
+        s_col = spec["secondary_col"]
+        s_fmt = f"CAST(SUM({s_col}) AS STRING)" if spec["secondary_is_int"] else f"FORMAT('%.2f', SUM({s_col}))"
+        n4_expr = spec["n4_expr"]
+
+        extra_selects = []
+        if dom == "payment_transactions" and "geo_distance_km" in cols and "velocity_1h" in cols:
+            extra_selects.append("COUNTIF(geo_distance_km IS NOT NULL AND velocity_1h >= 1) AS feat_cnt")
+            extra_selects.append("COUNTIF(velocity_1h >= 5 OR geo_distance_km > 500.0) AS anomaly_cnt")
+            extra_selects.append("COUNT(DISTINCT IF(device_id = 'DEV-FRAUD-999', customer_id, NULL)) AS ring_cnt")
+        else:
+            extra_selects.append("-1 AS feat_cnt, -1 AS anomaly_cnt, -1 AS ring_cnt")
+
+        sql = f"""
+        SELECT
+          COUNT(*) AS cnt,
+          COUNTIF({n4_expr}) AS n4_cnt,
+          FORMAT('%.2f', SUM({p_col})) AS p_sum,
+          {s_fmt} AS s_sum,
+          {", ".join(extra_selects)}
+        FROM `{project_id}.{dataset}.{tbl}`
+        """
+        q_res = run_bq_query(project_id, sql)
+        silver_results[tbl] = {
+            "exists": True,
+            "columns": cols,
+            "table_metadata": meta,
+            "metrics": q_res,
+        }
+
+    telemetry = {
+        "project_id": project_id,
+        "dataset": dataset,
+        "region": region,
+        "silver_tables": silver_results,
     }
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -300,7 +406,7 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        z.writestr("pubsub_pipeline_config.json", json.dumps(data, indent=2))
+        z.writestr("silver_cleanse_fraud_features.json", json.dumps(telemetry, indent=2))
 
     return created_at, signature
 
@@ -310,7 +416,7 @@ def main():
     zip_path = os.path.join(script_dir, ZIP_FILENAME)
 
     print("=======================================================")
-    print(f" Lab Evaluation: L400-agentic-solution-eng - pubsub_pipeline")
+    print(f" Lab Evaluation: {LAB} - {EVAL_NAME}")
     print("=======================================================")
 
     student_account, student_ldap = get_student_identity()

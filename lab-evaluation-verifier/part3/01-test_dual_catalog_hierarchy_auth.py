@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - cloud_run_deployment
-Fetches Cloud Run service status and deployment telemetry.
-Supports both Automatic submission (local proxy) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part3 - dual_catalog_hierarchy_auth
+Gathers BigQuery Connection (lakehouse-vending-conn) and Dual BigLake Iceberg REST Catalog (acme_bronze_dev & acme_silver_dev) state.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
 import json
 import uuid
@@ -17,8 +18,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "cloud_run_deployment"
+LAB = "L400-da-data-engineering-part3"
+EVAL_NAME = "dual_catalog_hierarchy_auth"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -61,7 +62,6 @@ def get_student_identity() -> tuple[str, str]:
     and prioritizes authenticated human accounts (@google.com or @*.altostrat.com).
     """
     account = ""
-    # 1. Check if active gcloud account is a human user
     try:
         result = subprocess.run(
             ["gcloud", "config", "get-value", "account"],
@@ -76,8 +76,6 @@ def get_student_identity() -> tuple[str, str]:
     except Exception:
         pass
 
-    # 2. If active account is missing or a service account (e.g. Cloudtop VM service account),
-    # search credentialed accounts in gcloud auth list
     if not account:
         try:
             out = subprocess.run(["gcloud", "auth", "list", "--format=json"], capture_output=True, text=True, timeout=5)
@@ -97,7 +95,6 @@ def get_student_identity() -> tuple[str, str]:
         except Exception:
             pass
 
-    # 3. Fallback to OS USER environment variable (corporate LDAP on Cloudtop/macOS)
     if not account:
         os_user = os.environ.get("USER", "").strip()
         if os_user and not is_service_account(os_user):
@@ -109,21 +106,48 @@ def get_student_identity() -> tuple[str, str]:
     return account, student_ldap
 
 
-def get_gcp_context():
-    """Reads project and dataset configurations from agent-config.json or gcloud."""
-    project_id = ""
-    dataset = ""
-    region = ""
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
 
-    if os.path.exists("agent-config.json"):
-        try:
-            with open("agent-config.json", "r") as f:
-                cfg = json.load(f)
-                project_id = cfg.get("gcp-project-id", "")
-                dataset = cfg.get("bigquery-dataset", "")
-                region = cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
-        except Exception:
-            pass
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
 
     if not project_id or project_id == "null":
         try:
@@ -133,7 +157,7 @@ def get_gcp_context():
         except Exception:
             pass
 
-    return project_id, dataset, region
+    return project_id, dataset, region or "us-central1"
 
 
 def safe_json_loads(text: str, default=None):
@@ -158,7 +182,6 @@ def get_identity_token() -> tuple[str, str]:
     permissions succeed even when an Argolis/lab account is the active gcloud account.
     Returns (token, account_used).
     """
-    # 1. Search gcloud auth list for an authenticated @google.com account
     try:
         out = subprocess.run(["gcloud", "auth", "list", "--format=json"], capture_output=True, text=True, timeout=5)
         if out.returncode == 0:
@@ -176,7 +199,6 @@ def get_identity_token() -> tuple[str, str]:
     except Exception:
         pass
 
-    # 2. Fallback to active gcloud account
     try:
         res = subprocess.run(
             ["gcloud", "auth", "print-identity-token"],
@@ -199,6 +221,37 @@ def get_identity_token() -> tuple[str, str]:
     return "", ""
 
 
+def get_access_token() -> str:
+    """Retrieves OAuth2 access token from gcloud for REST API queries."""
+    try:
+        res = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True, timeout=10)
+        if res.returncode == 0:
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def api_get(url: str, access_token: str, project_id: str) -> tuple[int, dict]:
+    """Performs an authenticated GET request against Google Cloud REST APIs."""
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "x-goog-user-project": project_id,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+            return resp.status, safe_json_loads(raw, {})
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8") if e.fp else str(e)
+        return e.code, safe_json_loads(raw, {"raw_error": raw})
+    except Exception as e:
+        return 500, {"raw_error": str(e)}
+
+
 def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
     """Submits the zip bundle to the Cloud Run validator endpoint."""
     boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
@@ -211,11 +264,11 @@ def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="lab"',
         b"",
-        f"L400-agentic-solution-eng".encode("utf-8"),
+        LAB.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="evaluation"',
         b"",
-        f"cloud_run_deployment".encode("utf-8"),
+        EVAL_NAME.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         f'Content-Disposition: form-data; name="files"; filename="{filename}"'.encode("utf-8"),
         b"Content-Type: application/zip",
@@ -271,17 +324,56 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Fetches Cloud Run service status and bundles into zip."""
+    """Queries BigQuery Connection and BigLake Iceberg REST Catalogs for Phase 1."""
     project_id, _, region = get_gcp_context()
-    service_name = "ads-incident-radar-ui"
-    region = region or "us-central1"
     if not project_id:
         print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
 
-    print(f"Fetching Cloud Run service status: {service_name} in {region} ({project_id})...")
-    p = subprocess.run(["gcloud", "run", "services", "describe", service_name, f"--region={region}", f"--project={project_id}", "--format=json"], capture_output=True, text=True)
-    status_data = safe_json_loads(p.stdout, {}) if (p.returncode == 0 and p.stdout.strip()) else {"error": p.stderr.strip() or "Query failed"} if p.returncode == 0 else {"error": p.stderr.strip() or "Service not found"}
+    env_sfx = os.environ.get("ENV", "dev").lower()
+    access_token = get_access_token()
+
+    print(f"Fetching BigQuery Connection and BigLake Iceberg REST Catalogs for project: {project_id} ({region})...")
+    conn_code, conn_resp = api_get(
+        f"https://bigqueryconnection.googleapis.com/v1/projects/{project_id}/locations/{region}/connections/lakehouse-vending-conn",
+        access_token,
+        project_id,
+    )
+
+    cat_code, cat_resp = api_get(
+        f"https://biglake.googleapis.com/iceberg/v1beta/restcatalog/extensions/projects/{project_id}/catalogs",
+        access_token,
+        project_id,
+    )
+
+    catalog_configs = {}
+    for tier in ("bronze", "silver"):
+        cat_id = f"acme_{tier}_{env_sfx}"
+        cfg_code, cfg_resp = api_get(
+            f"https://biglake.googleapis.com/iceberg/v1/restcatalog/v1/config?warehouse=bl://projects/{project_id}/catalogs/{cat_id}",
+            access_token,
+            project_id,
+        )
+        catalog_configs[cat_id] = {
+            "http_status": cfg_code,
+            "config": cfg_resp,
+        }
+
+    telemetry = {
+        "project_id": project_id,
+        "region": region,
+        "environment": env_sfx,
+        "bigquery_connection": {
+            "connection_id": "lakehouse-vending-conn",
+            "http_status": conn_code,
+            "response": conn_resp,
+        },
+        "biglake_iceberg_catalogs": {
+            "http_status": cat_code,
+            "response": cat_resp,
+        },
+        "iceberg_rest_configs": catalog_configs,
+    }
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     signature = calculate_signature(student_ldap, LAB, EVAL_NAME, created_at, SALT)
@@ -297,7 +389,7 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        z.writestr("cloud_run_service_status.json", json.dumps(status_data, indent=2))
+        z.writestr("dual_catalog_hierarchy_auth.json", json.dumps(telemetry, indent=2))
 
     return created_at, signature
 
@@ -307,7 +399,7 @@ def main():
     zip_path = os.path.join(script_dir, ZIP_FILENAME)
 
     print("=======================================================")
-    print(f" Lab Evaluation: L400-agentic-solution-eng - cloud_run_deployment")
+    print(f" Lab Evaluation: {LAB} - {EVAL_NAME}")
     print("=======================================================")
 
     student_account, student_ldap = get_student_identity()

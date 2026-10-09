@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - check_evals
-Gathers automated security evaluation scripts in evals/security-audits into a submission package.
-Supports both Automatic submission (Cloud Run validator) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part1 - enriched_parquet_output
+Verifies and inventories enriched Parquet output files in the Lakehouse Warehouse bucket.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
-import glob
 import json
 import uuid
 import hashlib
@@ -18,8 +18,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "check_evals"
+LAB = "L400-da-data-engineering-part1"
+EVAL_NAME = "enriched_parquet_output"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -108,6 +108,70 @@ def get_student_identity() -> tuple[str, str]:
 
     student_ldap = extract_ldap(account)
     return account, student_ldap
+
+
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
+
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
+
+    if not project_id or project_id == "null":
+        try:
+            res = subprocess.run(["gcloud", "config", "get-value", "project"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip() and res.stdout.strip() != "(unset)":
+                project_id = res.stdout.strip()
+        except Exception:
+            pass
+
+    return project_id, dataset, region or "us-central1"
+
+
+def safe_json_loads(text: str, default=None):
+    """Safely decodes JSON text, returning default if empty or invalid."""
+    if not text or not str(text).strip():
+        return default if default is not None else {}
+    try:
+        return json.loads(text)
+    except Exception:
+        return default if default is not None else {"raw_output": str(text).strip()}
 
 
 def calculate_signature(student_ldap: str, lab: str, evaluation: str, created_at: str, salt: str) -> str:
@@ -235,23 +299,43 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Bundles security evaluation scripts and writes manifest.json."""
-    evals_dir = "evals/security-audits"
-    if not os.path.isdir(evals_dir) and os.path.isdir("../evals/security-audits"):
-        os.chdir("..")
-
-    if not os.path.isdir(evals_dir):
-        print(f"Error: '{evals_dir}' directory not found.")
-        print("Please ensure evals/security-audits has been created with security audit scripts.")
+    """Lists enriched Parquet output files in the Lakehouse Warehouse bucket."""
+    project_id, _, region = get_gcp_context()
+    if not project_id:
+        print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
 
-    print(f"Gathering security audit evaluation scripts from {evals_dir}...")
-    eval_files = sorted(glob.glob(os.path.join(evals_dir, "*")))
-    eval_files = [f for f in eval_files if os.path.isfile(f) and not f.endswith(".zip")]
+    candidate_paths = [
+        f"gs://{project_id}-lakehouse-warehouse/orders_enriched_fixed/part-*.parquet",
+        f"gs://{project_id}-lakehouse-warehouse/orders_enriched_nqe/part-*.parquet",
+        f"gs://{project_id}-lakehouse-warehouse/orders_enriched/part-*.parquet",
+    ]
+    print(f"Checking enriched Parquet output in gs://{project_id}-lakehouse-warehouse/...")
 
-    if not eval_files:
-        print(f"Error: No evaluation scripts found in '{evals_dir}'.")
-        sys.exit(1)
+    inventory = {}
+    matched_pattern = ""
+    parquet_files = []
+
+    for pat in candidate_paths:
+        p = subprocess.run(["gcloud", "storage", "ls", pat, f"--project={project_id}"], capture_output=True, text=True, timeout=30)
+        files = [ln.strip() for ln in p.stdout.splitlines() if ln.strip().endswith(".parquet")] if p.returncode == 0 else []
+        inventory[pat] = {
+            "count": len(files),
+            "files": files,
+            "error": p.stderr.strip() if p.returncode != 0 else None,
+        }
+        if files and not matched_pattern:
+            matched_pattern = pat
+            parquet_files = files
+
+    payload = {
+        "project_id": project_id,
+        "region": region,
+        "matched_pattern": matched_pattern or None,
+        "parquet_file_count": len(parquet_files),
+        "parquet_files": parquet_files,
+        "inventory_by_prefix": inventory,
+    }
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     signature = calculate_signature(student_ldap, LAB, EVAL_NAME, created_at, SALT)
@@ -267,9 +351,7 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        for ef in eval_files:
-            z.write(ef, ef)
-            z.write(ef, os.path.basename(ef))
+        z.writestr("enriched_parquet_output.json", json.dumps(payload, indent=2))
 
     return created_at, signature
 

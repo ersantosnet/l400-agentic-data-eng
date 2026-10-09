@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - ai_rules
-Gathers operational standards and governance files in .ai-rules into a submission package.
-Supports both Automatic submission (Cloud Run validator) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part1 - vectorized_pyspark_script
+Gathers the refactored vectorized PySpark script (orders_enrichment_fixed.py) from GCS or local workspace.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
-import glob
 import json
 import uuid
 import hashlib
@@ -18,8 +18,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "ai_rules"
+LAB = "L400-da-data-engineering-part1"
+EVAL_NAME = "vectorized_pyspark_script"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -108,6 +108,70 @@ def get_student_identity() -> tuple[str, str]:
 
     student_ldap = extract_ldap(account)
     return account, student_ldap
+
+
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
+
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
+
+    if not project_id or project_id == "null":
+        try:
+            res = subprocess.run(["gcloud", "config", "get-value", "project"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip() and res.stdout.strip() != "(unset)":
+                project_id = res.stdout.strip()
+        except Exception:
+            pass
+
+    return project_id, dataset, region or "us-central1"
+
+
+def safe_json_loads(text: str, default=None):
+    """Safely decodes JSON text, returning default if empty or invalid."""
+    if not text or not str(text).strip():
+        return default if default is not None else {}
+    try:
+        return json.loads(text)
+    except Exception:
+        return default if default is not None else {"raw_output": str(text).strip()}
 
 
 def calculate_signature(student_ldap: str, lab: str, evaluation: str, created_at: str, salt: str) -> str:
@@ -235,22 +299,42 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Bundles .ai-rules files and writes manifest.json."""
-    rules_dir = ".ai-rules"
-    if not os.path.isdir(rules_dir) and os.path.isdir("../.ai-rules"):
-        os.chdir("..")
-
-    if not os.path.isdir(rules_dir):
-        print(f"Error: '{rules_dir}' directory not found.")
-        print("Please ensure .ai-rules directory has been created.")
+    """Fetches orders_enrichment_fixed.py from GCS or local workspace and bundles it."""
+    project_id, _, region = get_gcp_context()
+    if not project_id:
+        print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
 
-    print(f"Gathering AI governance and standards documents from {rules_dir}...")
-    rule_files = sorted(glob.glob(os.path.join(rules_dir, "*.md")))
+    gcs_uri = f"gs://{project_id}-lakehouse-warehouse/scripts/orders_enrichment_fixed.py"
+    print(f"Gathering vectorized PySpark script from {gcs_uri} (project: {project_id})...")
 
-    if not rule_files:
-        print(f"Error: No markdown rule files found in '{rules_dir}'.")
-        sys.exit(1)
+    p = subprocess.run(["gcloud", "storage", "cat", gcs_uri, f"--project={project_id}"], capture_output=True, text=True, timeout=45)
+    script_content = ""
+    source_location = ""
+
+    if p.returncode == 0 and p.stdout.strip():
+        script_content = p.stdout
+        source_location = gcs_uri
+    else:
+        for local_candidate in (
+            "scripts/orders_enrichment_fixed.py",
+            "../scripts/orders_enrichment_fixed.py",
+            "../../scripts/orders_enrichment_fixed.py",
+        ):
+            if os.path.isfile(local_candidate):
+                with open(local_candidate, "r", encoding="utf-8") as f:
+                    script_content = f.read()
+                source_location = local_candidate
+                break
+
+    metadata = {
+        "project_id": project_id,
+        "region": region,
+        "expected_gcs_uri": gcs_uri,
+        "found": bool(script_content.strip()),
+        "source_location": source_location or None,
+        "gcs_error": p.stderr.strip() if p.returncode != 0 else None,
+    }
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     signature = calculate_signature(student_ldap, LAB, EVAL_NAME, created_at, SALT)
@@ -266,9 +350,10 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        for rf in rule_files:
-            z.write(rf, rf)
-            z.write(rf, os.path.basename(rf))
+        z.writestr("script_source_metadata.json", json.dumps(metadata, indent=2))
+        if script_content:
+            z.writestr("orders_enrichment_fixed.py", script_content)
+            z.writestr("scripts/orders_enrichment_fixed.py", script_content)
 
     return created_at, signature
 

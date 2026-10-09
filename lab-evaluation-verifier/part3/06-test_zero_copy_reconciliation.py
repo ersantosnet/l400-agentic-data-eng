@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - verify_prompts
-Gathers modular design documents in docs/design/ into a submission package.
-Supports both Automatic submission (Cloud Run validator) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part3 - zero_copy_reconciliation
+Verifies 100% penny-exact zero-copy reconciliation across payment_method IN (0, 1, 2)
+between BigLake Iceberg Silver tables and BigQuery Native Storage Gold feature mart.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
-import glob
 import json
 import uuid
 import hashlib
@@ -18,8 +19,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "verify_prompts"
+LAB = "L400-da-data-engineering-part3"
+EVAL_NAME = "zero_copy_reconciliation"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -57,12 +58,8 @@ def is_service_account(acc: str) -> bool:
 
 
 def get_student_identity() -> tuple[str, str]:
-    """Discovers active gcloud account and extracts LDAP identity.
-    Filters out machine/VM service accounts (such as Cloudtop shared service accounts)
-    and prioritizes authenticated human accounts (@google.com or @*.altostrat.com).
-    """
+    """Discovers active gcloud account and extracts LDAP identity."""
     account = ""
-    # 1. Check if active gcloud account is a human user
     try:
         result = subprocess.run(
             ["gcloud", "config", "get-value", "account"],
@@ -77,8 +74,6 @@ def get_student_identity() -> tuple[str, str]:
     except Exception:
         pass
 
-    # 2. If active account is missing or a service account (e.g. Cloudtop VM service account),
-    # search credentialed accounts in gcloud auth list
     if not account:
         try:
             out = subprocess.run(["gcloud", "auth", "list", "--format=json"], capture_output=True, text=True, timeout=5)
@@ -98,7 +93,6 @@ def get_student_identity() -> tuple[str, str]:
         except Exception:
             pass
 
-    # 3. Fallback to OS USER environment variable (corporate LDAP on Cloudtop/macOS)
     if not account:
         os_user = os.environ.get("USER", "").strip()
         if os_user and not is_service_account(os_user):
@@ -110,6 +104,70 @@ def get_student_identity() -> tuple[str, str]:
     return account, student_ldap
 
 
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
+
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
+
+    if not project_id or project_id == "null":
+        try:
+            res = subprocess.run(["gcloud", "config", "get-value", "project"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip() and res.stdout.strip() != "(unset)":
+                project_id = res.stdout.strip()
+        except Exception:
+            pass
+
+    return project_id, dataset or "fraud_detection_db", region or "us-central1"
+
+
+def safe_json_loads(text: str, default=None):
+    """Safely decodes JSON text, returning default if empty or invalid."""
+    if not text or not str(text).strip():
+        return default if default is not None else {}
+    try:
+        return json.loads(text)
+    except Exception:
+        return default if default is not None else {"raw_output": str(text).strip()}
+
+
 def calculate_signature(student_ldap: str, lab: str, evaluation: str, created_at: str, salt: str) -> str:
     """Generates SHA-256 signature for bundle anti-tampering."""
     raw = f"{student_ldap.strip().lower()}:{lab.strip().lower()}:{evaluation.strip().lower()}:{created_at.strip().lower()}:{salt}"
@@ -117,12 +175,7 @@ def calculate_signature(student_ldap: str, lab: str, evaluation: str, created_at
 
 
 def get_identity_token() -> tuple[str, str]:
-    """Retrieves Google identity token for authenticating directly against Cloud Run.
-    Explicitly prioritizes an authenticated @google.com account so Cloud Run invoker
-    permissions succeed even when an Argolis/lab account is the active gcloud account.
-    Returns (token, account_used).
-    """
-    # 1. Search gcloud auth list for an authenticated @google.com account
+    """Retrieves Google identity token for authenticating directly against Cloud Run."""
     try:
         out = subprocess.run(["gcloud", "auth", "list", "--format=json"], capture_output=True, text=True, timeout=5)
         if out.returncode == 0:
@@ -140,7 +193,6 @@ def get_identity_token() -> tuple[str, str]:
     except Exception:
         pass
 
-    # 2. Fallback to active gcloud account
     try:
         res = subprocess.run(
             ["gcloud", "auth", "print-identity-token"],
@@ -161,6 +213,15 @@ def get_identity_token() -> tuple[str, str]:
         pass
 
     return "", ""
+
+
+def run_bq_query(project_id: str, sql: str):
+    """Runs a BigQuery SQL query and returns parsed JSON rows or error dict."""
+    cmd = ["bq", "query", f"--project_id={project_id}", "--use_legacy_sql=false", "--format=prettyjson", sql]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode == 0 and p.stdout.strip():
+        return safe_json_loads(p.stdout, {"error": p.stderr.strip() or "Query failed"})
+    return {"error": (p.stderr or p.stdout or "Query failed").strip()}
 
 
 def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
@@ -235,22 +296,72 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Bundles design prompt files and writes manifest.json."""
-    # Ensure we locate docs/design correctly whether run from root or evals/
-    design_dir = "docs/design"
-    if not os.path.isdir(design_dir) and os.path.isdir("../docs/design"):
-        os.chdir("..")
-
-    if not os.path.isdir(design_dir):
-        print("Error: 'docs/design' directory not found in current path.")
-        print("Please run this script from the workspace root.")
+    """Runs the cross-engine Silver-to-Gold reconciliation query by payment_method."""
+    project_id, dataset, region = get_gcp_context()
+    if not project_id:
+        print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
 
-    print(f"Gathering design prompt documents from {design_dir}...")
-    design_files = sorted(glob.glob(os.path.join(design_dir, "DESIGN-*.md")))
-    if not design_files:
-        print(f"Error: No DESIGN-*.md files found in '{design_dir}'.")
-        sys.exit(1)
+    print(f"Running Zero-Copy Silver-to-Gold reconciliation query in {project_id}...")
+    rec_sql = f"""
+    WITH silver_disputes_by_tx AS (
+      SELECT
+        transaction_id,
+        COUNT(dispute_id) AS dispute_count,
+        ROUND(SUM(dispute_amount), 2) AS disputed_amount,
+        ROUND(SUM(penalty_fee_usd), 2) AS penalty_fee_usd
+      FROM `{project_id}.fraud_detection_db.chargeback_disputes_silver`
+      GROUP BY transaction_id
+    ),
+    silver_agg AS (
+      SELECT
+        t.payment_method,
+        COUNT(t.transaction_id) AS silver_tx_count,
+        ROUND(SUM(t.tx_amount), 2) AS silver_gross_usd,
+        ROUND(SUM(t.net_amount_after_discount), 2) AS silver_net_usd,
+        SUM(COALESCE(d.dispute_count, 0)) AS silver_dispute_count,
+        ROUND(SUM(COALESCE(d.disputed_amount, NUMERIC '0.00')), 2) AS silver_disputed_usd
+      FROM `{project_id}.fraud_detection_db.payment_transactions_silver` t
+      LEFT JOIN silver_disputes_by_tx d
+        ON t.transaction_id = d.transaction_id
+      GROUP BY t.payment_method
+    ),
+    gold_agg AS (
+      SELECT
+        payment_method,
+        SUM(total_tx_count) AS gold_tx_count,
+        ROUND(SUM(total_tx_amount), 2) AS gold_gross_usd,
+        ROUND(SUM(total_net_amount), 2) AS gold_net_usd,
+        SUM(disputed_tx_count) AS gold_dispute_count,
+        ROUND(SUM(total_disputed_amount), 2) AS gold_disputed_usd
+      FROM `{project_id}.fraud_features_gold.gold_fraud_features`
+      GROUP BY payment_method
+    )
+    SELECT
+      s.payment_method,
+      s.silver_tx_count,
+      g.gold_tx_count,
+      (s.silver_tx_count - g.gold_tx_count) AS row_count_diff,
+      FORMAT('%.2f', s.silver_gross_usd) AS silver_gross_usd,
+      FORMAT('%.2f', g.gold_gross_usd) AS gold_gross_usd,
+      FORMAT('%.2f', s.silver_gross_usd - g.gold_gross_usd) AS gross_variance_usd,
+      FORMAT('%.2f', s.silver_net_usd) AS silver_net_usd,
+      FORMAT('%.2f', g.gold_net_usd) AS gold_net_usd,
+      FORMAT('%.2f', s.silver_net_usd - g.gold_net_usd) AS net_variance_usd,
+      FORMAT('%.2f', s.silver_disputed_usd) AS silver_disputed_usd,
+      FORMAT('%.2f', g.gold_disputed_usd) AS gold_disputed_usd,
+      FORMAT('%.2f', s.silver_disputed_usd - g.gold_disputed_usd) AS disputed_variance_usd
+    FROM silver_agg s
+    INNER JOIN gold_agg g USING (payment_method)
+    ORDER BY s.payment_method
+    """
+    reconciliation_rows = run_bq_query(project_id, rec_sql)
+
+    telemetry = {
+        "project_id": project_id,
+        "region": region,
+        "reconciliation_rows": reconciliation_rows,
+    }
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     signature = calculate_signature(student_ldap, LAB, EVAL_NAME, created_at, SALT)
@@ -266,9 +377,7 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        for df in design_files:
-            z.write(df, df)
-            z.write(df, os.path.basename(df))
+        z.writestr("zero_copy_reconciliation.json", json.dumps(telemetry, indent=2))
 
     return created_at, signature
 

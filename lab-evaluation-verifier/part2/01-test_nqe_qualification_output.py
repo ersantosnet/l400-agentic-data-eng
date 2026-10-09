@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - artifact_registry
-Fetches Artifact Registry repository configuration.
-Supports both Automatic submission (local proxy) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part2 - nqe_qualification_output
+Gathers NQE Qualification Tool TSV output (AppsRecommendedForBoost.tsv) from GCS.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
 import json
 import uuid
@@ -17,8 +18,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "artifact_registry"
+LAB = "L400-da-data-engineering-part2"
+EVAL_NAME = "nqe_qualification_output"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -109,21 +110,48 @@ def get_student_identity() -> tuple[str, str]:
     return account, student_ldap
 
 
-def get_gcp_context():
-    """Reads project and dataset configurations from agent-config.json or gcloud."""
-    project_id = ""
-    dataset = ""
-    region = ""
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
 
-    if os.path.exists("agent-config.json"):
-        try:
-            with open("agent-config.json", "r") as f:
-                cfg = json.load(f)
-                project_id = cfg.get("gcp-project-id", "")
-                dataset = cfg.get("bigquery-dataset", "")
-                region = cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
-        except Exception:
-            pass
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
 
     if not project_id or project_id == "null":
         try:
@@ -133,7 +161,7 @@ def get_gcp_context():
         except Exception:
             pass
 
-    return project_id, dataset, region
+    return project_id, dataset, region or "us-central1"
 
 
 def safe_json_loads(text: str, default=None):
@@ -211,11 +239,11 @@ def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="lab"',
         b"",
-        f"L400-agentic-solution-eng".encode("utf-8"),
+        LAB.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="evaluation"',
         b"",
-        f"artifact_registry".encode("utf-8"),
+        EVAL_NAME.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         f'Content-Disposition: form-data; name="files"; filename="{filename}"'.encode("utf-8"),
         b"Content-Type: application/zip",
@@ -271,17 +299,47 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Fetches Artifact Registry repository details."""
+    """Fetches NQE Qualification Tool TSV output from gs://<project_id>-nqe-audit-results/."""
     project_id, _, region = get_gcp_context()
-    repo_name = "ads-radar-repo"
-    repo_loc = region or "us-central1"
     if not project_id:
         print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
 
-    print(f"Fetching Artifact Registry repository details: {repo_name} ({repo_loc})...")
-    p = subprocess.run(["gcloud", "artifacts", "repositories", "describe", repo_name, f"--location={repo_loc}", f"--project={project_id}", "--format=json"], capture_output=True, text=True)
-    data = safe_json_loads(p.stdout, {"error": p.stderr.strip() or "Not found"}) if (p.returncode == 0 and p.stdout.strip()) else {"error": p.stderr.strip() or "Not found"}
+    bucket_uri = f"gs://{project_id}-nqe-audit-results"
+    print(f"Checking NQE Qualification TSV output in {bucket_uri}...")
+
+    tsv_patterns = [
+        f"{bucket_uri}/*AppsRecommendedForBoost*.tsv",
+        f"{bucket_uri}/**/*AppsRecommendedForBoost*.tsv",
+        f"{bucket_uri}/*qualification*.tsv",
+    ]
+    tsv_content = ""
+    matched_uri = ""
+    all_matched_uris = []
+
+    for pat in tsv_patterns:
+        ls_proc = subprocess.run(["gcloud", "storage", "ls", pat, f"--project={project_id}"], capture_output=True, text=True, timeout=30)
+        if ls_proc.returncode == 0 and ls_proc.stdout.strip():
+            uris = [u.strip() for u in ls_proc.stdout.splitlines() if u.strip()]
+            all_matched_uris.extend(uris)
+            for first_uri in uris:
+                cat_proc = subprocess.run(["gcloud", "storage", "cat", first_uri, f"--project={project_id}"], capture_output=True, text=True, timeout=45)
+                if cat_proc.returncode == 0 and cat_proc.stdout.strip():
+                    tsv_content = cat_proc.stdout
+                    matched_uri = first_uri
+                    break
+        if tsv_content:
+            break
+
+    audit_info = {
+        "project_id": project_id,
+        "region": region,
+        "audit_bucket": bucket_uri,
+        "matched_tsv_uri": matched_uri or None,
+        "candidate_uris": list(dict.fromkeys(all_matched_uris)),
+        "found": bool(tsv_content.strip()),
+        "tsv_content": tsv_content,
+    }
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     signature = calculate_signature(student_ldap, LAB, EVAL_NAME, created_at, SALT)
@@ -297,7 +355,9 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        z.writestr("artifact_registry_repo.json", json.dumps(data, indent=2))
+        z.writestr("nqe_audit_files.json", json.dumps(audit_info, indent=2))
+        if tsv_content:
+            z.writestr("AppsRecommendedForBoost.tsv", tsv_content)
 
     return created_at, signature
 
@@ -307,7 +367,7 @@ def main():
     zip_path = os.path.join(script_dir, ZIP_FILENAME)
 
     print("=======================================================")
-    print(f" Lab Evaluation: L400-agentic-solution-eng - artifact_registry")
+    print(f" Lab Evaluation: {LAB} - {EVAL_NAME}")
     print("=======================================================")
 
     student_account, student_ldap = get_student_identity()

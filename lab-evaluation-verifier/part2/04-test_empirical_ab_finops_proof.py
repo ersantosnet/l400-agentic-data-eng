@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - graphify
-Gathers graphify knowledge graph artifacts in graphify-out into a submission package.
-Supports both Automatic submission (Cloud Run validator) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part2 - empirical_ab_finops_proof
+Gathers empirical A/B benchmark execution telemetry and FinOps ROI summary artifacts.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
-import glob
 import json
 import uuid
 import hashlib
@@ -18,8 +18,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "graphify"
+LAB = "L400-da-data-engineering-part2"
+EVAL_NAME = "empirical_ab_finops_proof"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -108,6 +108,70 @@ def get_student_identity() -> tuple[str, str]:
 
     student_ldap = extract_ldap(account)
     return account, student_ldap
+
+
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
+
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
+
+    if not project_id or project_id == "null":
+        try:
+            res = subprocess.run(["gcloud", "config", "get-value", "project"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip() and res.stdout.strip() != "(unset)":
+                project_id = res.stdout.strip()
+        except Exception:
+            pass
+
+    return project_id, dataset, region or "us-central1"
+
+
+def safe_json_loads(text: str, default=None):
+    """Safely decodes JSON text, returning default if empty or invalid."""
+    if not text or not str(text).strip():
+        return default if default is not None else {}
+    try:
+        return json.loads(text)
+    except Exception:
+        return default if default is not None else {"raw_output": str(text).strip()}
 
 
 def calculate_signature(student_ldap: str, lab: str, evaluation: str, created_at: str, salt: str) -> str:
@@ -235,23 +299,43 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Bundles graphify-out knowledge graph and writes manifest.json."""
-    graph_dir = "graphify-out"
-    if not os.path.isdir(graph_dir) and os.path.isdir("../graphify-out"):
-        os.chdir("..")
-
-    if not os.path.isdir(graph_dir):
-        print(f"Error: '{graph_dir}' directory not found.")
-        print("Please ensure Graphify prompt has been executed and graphify-out directory exists.")
+    """Fetches FinOps ROI summary artifacts and A/B benchmark Dataproc batches."""
+    project_id, _, region = get_gcp_context()
+    if not project_id:
+        print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
 
-    graph_file = os.path.join(graph_dir, "graph.json")
-    if not os.path.isfile(graph_file):
-        print(f"Error: Knowledge graph file '{graph_file}' not found.")
-        print("Please ensure graphify was executed to generate graph.json.")
-        sys.exit(1)
+    print(f"Fetching A/B benchmark FinOps ROI proof and Dataproc batches for project: {project_id}...")
+    summary_uris = [
+        f"gs://{project_id}-nqe-audit-results/part2_benchmark_summary.json",
+        f"gs://{project_id}-nqe-audit-results/roi_summary.json",
+    ]
+    roi_summary = {}
+    matched_summary_uri = ""
+    for uri in summary_uris:
+        p = subprocess.run(["gcloud", "storage", "cat", uri, f"--project={project_id}"], capture_output=True, text=True, timeout=30)
+        if p.returncode == 0 and p.stdout.strip():
+            roi_summary = safe_json_loads(p.stdout, {"raw": p.stdout})
+            matched_summary_uri = uri
+            break
 
-    print(f"Gathering Graphify knowledge graph artifacts from {graph_dir}...")
+    b_proc = subprocess.run(
+        ["gcloud", "dataproc", "batches", "list", f"--project={project_id}", f"--region={region}", "--format=json"],
+        capture_output=True,
+        text=True,
+        timeout=45
+    )
+    all_batches = safe_json_loads(b_proc.stdout, []) if (b_proc.returncode == 0 and b_proc.stdout.strip()) else []
+
+    ab_batches = []
+    if isinstance(all_batches, list):
+        for b in all_batches:
+            if not isinstance(b, dict):
+                continue
+            main_py = (b.get("pysparkBatch") or {}).get("mainPythonFileUri", "")
+            if "pure_sql_benchmark.py" in main_py:
+                ab_batches.append(b)
+
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     signature = calculate_signature(student_ldap, LAB, EVAL_NAME, created_at, SALT)
 
@@ -266,13 +350,19 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        z.write(graph_file, "graphify-out/graph.json")
-        z.write(graph_file, "graph.json")
-
-        report_file = os.path.join(graph_dir, "GRAPH_REPORT.md")
-        if os.path.isfile(report_file):
-            z.write(report_file, "graphify-out/GRAPH_REPORT.md")
-            z.write(report_file, "GRAPH_REPORT.md")
+        z.writestr("finops_roi_summary.json", json.dumps({
+            "project_id": project_id,
+            "region": region,
+            "matched_summary_uri": matched_summary_uri or None,
+            "summary": roi_summary,
+        }, indent=2))
+        z.writestr("ab_benchmark_batches.json", json.dumps({
+            "project_id": project_id,
+            "region": region,
+            "pure_sql_benchmark_batches_count": len(ab_batches),
+            "pure_sql_benchmark_batches": ab_batches,
+            "all_batches": all_batches,
+        }, indent=2))
 
     return created_at, signature
 

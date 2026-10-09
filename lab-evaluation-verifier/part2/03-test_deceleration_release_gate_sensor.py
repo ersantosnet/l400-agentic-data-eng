@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - command_center_backend_code
-Packages FastAPI backend source files for 3D command center.
-Supports both Automatic submission (local proxy) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part2 - deceleration_release_gate_sensor
+Extracts the Event-Log Deceleration Release Gate Sensor telemetry from nqe_benchmark_dag.py.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
 import json
 import uuid
@@ -17,8 +18,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "command_center_backend_code"
+LAB = "L400-da-data-engineering-part2"
+EVAL_NAME = "deceleration_release_gate_sensor"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -109,21 +110,48 @@ def get_student_identity() -> tuple[str, str]:
     return account, student_ldap
 
 
-def get_gcp_context():
-    """Reads project and dataset configurations from agent-config.json or gcloud."""
-    project_id = ""
-    dataset = ""
-    region = ""
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
 
-    if os.path.exists("agent-config.json"):
-        try:
-            with open("agent-config.json", "r") as f:
-                cfg = json.load(f)
-                project_id = cfg.get("gcp-project-id", "")
-                dataset = cfg.get("bigquery-dataset", "")
-                region = cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
-        except Exception:
-            pass
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
 
     if not project_id or project_id == "null":
         try:
@@ -133,7 +161,7 @@ def get_gcp_context():
         except Exception:
             pass
 
-    return project_id, dataset, region
+    return project_id, dataset, region or "us-central1"
 
 
 def safe_json_loads(text: str, default=None):
@@ -211,11 +239,11 @@ def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="lab"',
         b"",
-        f"L400-agentic-solution-eng".encode("utf-8"),
+        LAB.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="evaluation"',
         b"",
-        f"command_center_backend_code".encode("utf-8"),
+        EVAL_NAME.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         f'Content-Disposition: form-data; name="files"; filename="{filename}"'.encode("utf-8"),
         b"Content-Type: application/zip",
@@ -271,10 +299,59 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Packages FastAPI backend files into zip."""
-    if not os.path.isfile("src/ads-incident-radar/main.py"):
-        print("Error: 'src/ads-incident-radar/main.py' not found in workspace.")
+    """Extracts the deceleration sensor logic and metadata from nqe_benchmark_dag.py."""
+    project_id, _, region = get_gcp_context()
+    if not project_id:
+        print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
+
+    print(f"Inspecting Event-Log Deceleration Release Gate Sensor in nqe_benchmark_dag.py (project: {project_id})...")
+    gcs_candidates = [
+        f"gs://{project_id}-lakehouse-warehouse/scripts/nqe_benchmark_dag.py",
+        f"gs://{project_id}-lakehouse-warehouse/dags/nqe_benchmark_dag.py",
+    ]
+
+    dag_code = ""
+    source_uri = ""
+    for gcs_uri in gcs_candidates:
+        p = subprocess.run(["gcloud", "storage", "cat", gcs_uri, f"--project={project_id}"], capture_output=True, text=True, timeout=30)
+        if p.returncode == 0 and p.stdout.strip():
+            dag_code = p.stdout
+            source_uri = gcs_uri
+            break
+
+    if not dag_code:
+        local_candidates = [
+            "dags/nqe_benchmark_dag.py",
+            "scripts/nqe_benchmark_dag.py",
+            "../dags/nqe_benchmark_dag.py",
+            "../scripts/nqe_benchmark_dag.py",
+            "../../dags/nqe_benchmark_dag.py",
+            "../../scripts/nqe_benchmark_dag.py",
+        ]
+        for lc in local_candidates:
+            if os.path.isfile(lc):
+                with open(lc, "r", encoding="utf-8") as f:
+                    dag_code = f.read()
+                source_uri = lc
+                break
+
+    sensor_telemetry = {
+        "project_id": project_id,
+        "region": region,
+        "source_uri": source_uri or None,
+        "dag_found": bool(dag_code.strip()),
+        "detected_listener_events": [
+            ev for ev in ("SparkListenerDriverAccumUpdates", "SparkListenerTaskEnd")
+            if ev in dag_code
+        ],
+        "detected_accumulator_names": [
+            acc for acc in ("ColumnarToRow", "VeloxToRow", "VeloxColumnarToRow")
+            if acc in dag_code
+        ],
+        "has_airflow_fail_exception": "AirflowFailException" in dag_code,
+        "has_500_threshold": "500" in dag_code,
+    }
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     signature = calculate_signature(student_ldap, LAB, EVAL_NAME, created_at, SALT)
@@ -290,12 +367,9 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        for p in ["src/ads-incident-radar/main.py", "src/ads-incident-radar/requirements.txt", "src/ads-incident-radar/Dockerfile"]:
-            if os.path.isfile(p):
-                z.write(p, p)
-                z.write(p, os.path.basename(p))
-        if os.path.isfile("agent-config.json"):
-            z.write("agent-config.json", "agent-config.json")
+        z.writestr("deceleration_sensor_telemetry.json", json.dumps(sensor_telemetry, indent=2))
+        if dag_code:
+            z.writestr("nqe_benchmark_dag.py", dag_code)
 
     return created_at, signature
 
@@ -305,7 +379,7 @@ def main():
     zip_path = os.path.join(script_dir, ZIP_FILENAME)
 
     print("=======================================================")
-    print(f" Lab Evaluation: L400-agentic-solution-eng - command_center_backend_code")
+    print(f" Lab Evaluation: {LAB} - {EVAL_NAME}")
     print("=======================================================")
 
     student_account, student_ldap = get_student_identity()

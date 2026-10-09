@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-agentic-solution-eng - streaming_simulator_code
-Packages streaming clickstream generator in src/stream-clickstream.
-Supports both Automatic submission (local proxy) and Manual submission (web upload).
+Lab Evaluation: L400-da-data-engineering-part3 - governance_composer_lineage
+Verifies staged Cloud Composer 3 DAG (medallion_lakehouse_dag.py), Policy Tags on Bronze ssn columns,
+Dataplex Knowledge Catalog Aspect Type (medallion-governance-template), Data Mesh (FraudDomain / FraudRiskFeatureStore),
+Auto Data Quality scan, and OpenLineage processes.
+Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
+import re
 import sys
 import json
 import uuid
@@ -17,8 +20,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-agentic-solution-eng"
-EVAL_NAME = "streaming_simulator_code"
+LAB = "L400-da-data-engineering-part3"
+EVAL_NAME = "governance_composer_lineage"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -56,12 +59,8 @@ def is_service_account(acc: str) -> bool:
 
 
 def get_student_identity() -> tuple[str, str]:
-    """Discovers active gcloud account and extracts LDAP identity.
-    Filters out machine/VM service accounts (such as Cloudtop shared service accounts)
-    and prioritizes authenticated human accounts (@google.com or @*.altostrat.com).
-    """
+    """Discovers active gcloud account and extracts LDAP identity."""
     account = ""
-    # 1. Check if active gcloud account is a human user
     try:
         result = subprocess.run(
             ["gcloud", "config", "get-value", "account"],
@@ -76,8 +75,6 @@ def get_student_identity() -> tuple[str, str]:
     except Exception:
         pass
 
-    # 2. If active account is missing or a service account (e.g. Cloudtop VM service account),
-    # search credentialed accounts in gcloud auth list
     if not account:
         try:
             out = subprocess.run(["gcloud", "auth", "list", "--format=json"], capture_output=True, text=True, timeout=5)
@@ -97,7 +94,6 @@ def get_student_identity() -> tuple[str, str]:
         except Exception:
             pass
 
-    # 3. Fallback to OS USER environment variable (corporate LDAP on Cloudtop/macOS)
     if not account:
         os_user = os.environ.get("USER", "").strip()
         if os_user and not is_service_account(os_user):
@@ -109,21 +105,48 @@ def get_student_identity() -> tuple[str, str]:
     return account, student_ldap
 
 
-def get_gcp_context():
-    """Reads project and dataset configurations from agent-config.json or gcloud."""
-    project_id = ""
-    dataset = ""
-    region = ""
+def get_gcp_context() -> tuple[str, str, str]:
+    """Reads project, dataset, and region configurations from CLI args, env vars, agent-config.json, terraform.tfvars, or gcloud."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or ""
+    dataset = os.environ.get("BIGQUERY_DATASET", "")
+    region = os.environ.get("REGION") or os.environ.get("GCP_REGION") or ""
 
-    if os.path.exists("agent-config.json"):
-        try:
-            with open("agent-config.json", "r") as f:
-                cfg = json.load(f)
-                project_id = cfg.get("gcp-project-id", "")
-                dataset = cfg.get("bigquery-dataset", "")
-                region = cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
-        except Exception:
-            pass
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg in ("--project-id", "--project") and i + 1 < len(argv):
+            project_id = argv[i + 1].strip()
+        elif arg.startswith("--project-id=") or arg.startswith("--project="):
+            project_id = arg.split("=", 1)[1].strip()
+        elif arg == "--region" and i + 1 < len(argv):
+            region = argv[i + 1].strip()
+        elif arg.startswith("--region="):
+            region = arg.split("=", 1)[1].strip()
+
+    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    project_id = project_id or cfg.get("gcp-project-id", "")
+                    dataset = dataset or cfg.get("bigquery-dataset", "")
+                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+            except Exception:
+                pass
+
+    if not project_id:
+        for tfvars_path in ("terraform/terraform.tfvars", "../terraform/terraform.tfvars", "../../terraform/terraform.tfvars"):
+            if os.path.exists(tfvars_path):
+                try:
+                    with open(tfvars_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                    if m_reg and not region:
+                        region = m_reg.group(1).strip()
+                except Exception:
+                    pass
 
     if not project_id or project_id == "null":
         try:
@@ -133,7 +156,7 @@ def get_gcp_context():
         except Exception:
             pass
 
-    return project_id, dataset, region
+    return project_id, dataset or "fraud_detection_db", region or "us-central1"
 
 
 def safe_json_loads(text: str, default=None):
@@ -153,12 +176,7 @@ def calculate_signature(student_ldap: str, lab: str, evaluation: str, created_at
 
 
 def get_identity_token() -> tuple[str, str]:
-    """Retrieves Google identity token for authenticating directly against Cloud Run.
-    Explicitly prioritizes an authenticated @google.com account so Cloud Run invoker
-    permissions succeed even when an Argolis/lab account is the active gcloud account.
-    Returns (token, account_used).
-    """
-    # 1. Search gcloud auth list for an authenticated @google.com account
+    """Retrieves Google identity token for authenticating directly against Cloud Run."""
     try:
         out = subprocess.run(["gcloud", "auth", "list", "--format=json"], capture_output=True, text=True, timeout=5)
         if out.returncode == 0:
@@ -176,7 +194,6 @@ def get_identity_token() -> tuple[str, str]:
     except Exception:
         pass
 
-    # 2. Fallback to active gcloud account
     try:
         res = subprocess.run(
             ["gcloud", "auth", "print-identity-token"],
@@ -199,6 +216,33 @@ def get_identity_token() -> tuple[str, str]:
     return "", ""
 
 
+def get_access_token() -> str:
+    """Retrieves Google Cloud OAuth2 access token for REST API calls."""
+    try:
+        res = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True, timeout=10)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def api_get(url: str, access_token: str, quota_project: str = "") -> tuple[int, dict]:
+    """Calls a GCP REST API GET endpoint and returns (status_code, parsed_json)."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if quota_project:
+        headers["x-goog-user-project"] = quota_project
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status, safe_json_loads(resp.read().decode("utf-8"), {})
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8") if e.fp else str(e)
+        return e.code, safe_json_loads(err_body, {"error": err_body})
+    except Exception as e:
+        return 0, {"error": str(e)}
+
+
 def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
     """Submits the zip bundle to the Cloud Run validator endpoint."""
     boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
@@ -211,11 +255,11 @@ def submit_bundle(validator_url: str, zip_path: str, token: str = ""):
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="lab"',
         b"",
-        f"L400-agentic-solution-eng".encode("utf-8"),
+        LAB.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         b'Content-Disposition: form-data; name="evaluation"',
         b"",
-        f"streaming_simulator_code".encode("utf-8"),
+        EVAL_NAME.encode("utf-8"),
         f"--{boundary}".encode("utf-8"),
         f'Content-Disposition: form-data; name="files"; filename="{filename}"'.encode("utf-8"),
         b"Content-Type: application/zip",
@@ -271,10 +315,151 @@ def print_manual_instructions(zip_filename: str):
 
 
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Packages src/stream-clickstream and agent-config.json into zip."""
-    if not os.path.isdir("src/stream-clickstream"):
-        print("Error: 'src/stream-clickstream' directory not found in workspace root.")
+    """Collects Composer DAG, Bronze Policy Tag metadata, Dataplex KC Aspect/Mesh, DQ Scans, and Lineage."""
+    project_id, dataset, region = get_gcp_context()
+    if not project_id:
+        print("Error: Could not determine PROJECT_ID.")
         sys.exit(1)
+
+    access_token = get_access_token()
+    warehouse_bucket = f"gs://{project_id}-lakehouse-warehouse"
+    dag_gcs_uri = f"{warehouse_bucket}/dags/medallion_lakehouse_dag.py"
+
+    print(f"Checking Composer DAG, Policy Tags, Dataplex KC, DQ Scans, and Lineage in {project_id}...")
+
+    # 1. Staged Composer DAG
+    dag_ls = subprocess.run(
+        ["gcloud", "storage", "ls", dag_gcs_uri, f"--project={project_id}"],
+        capture_output=True,
+        text=True
+    )
+    dag_staged_in_gcs = dag_ls.returncode == 0
+    dag_content = ""
+    if dag_staged_in_gcs:
+        cat_proc = subprocess.run(
+            ["gcloud", "storage", "cat", dag_gcs_uri, f"--project={project_id}"],
+            capture_output=True,
+            text=True
+        )
+        if cat_proc.returncode == 0:
+            dag_content = cat_proc.stdout
+    if not dag_content:
+        for local_cand in (
+            "dags/medallion_lakehouse_dag.py",
+            "scripts/medallion_lakehouse_dag.py",
+            "../../dags/medallion_lakehouse_dag.py",
+            "../../scripts/medallion_lakehouse_dag.py",
+            "../../lab-packs/part3/solution/medallion_lakehouse_dag.py",
+        ):
+            if os.path.exists(local_cand):
+                try:
+                    with open(local_cand, "r", encoding="utf-8") as f:
+                        dag_content = f.read()
+                    break
+                except Exception:
+                    pass
+
+    # 2. Bronze Policy Tags on ssn columns
+    bronze_policy_tags = {}
+    for tbl in ("customers_crm_bronze", "payment_transactions_bronze"):
+        show_proc = subprocess.run(
+            ["bq", "show", "--format=prettyjson", f"{project_id}:fraud_detection_db.{tbl}"],
+            capture_output=True,
+            text=True
+        )
+        if show_proc.returncode == 0 and show_proc.stdout.strip():
+            meta = safe_json_loads(show_proc.stdout, {})
+            ssn_field = next((f for f in meta.get("schema", {}).get("fields", []) if isinstance(f, dict) and f.get("name") == "ssn"), {})
+            ptags = ssn_field.get("policyTags", {}).get("names", []) if isinstance(ssn_field, dict) else []
+            bronze_policy_tags[tbl] = {
+                "exists": True,
+                "ssn_policy_tags": ptags,
+                "has_policy_tag": len(ptags) > 0,
+            }
+        else:
+            bronze_policy_tags[tbl] = {
+                "exists": False,
+                "ssn_policy_tags": [],
+                "has_policy_tag": False,
+                "error": (show_proc.stderr or show_proc.stdout or "Table not found").strip(),
+            }
+
+    # 3. Dataplex Knowledge Catalog Aspect Type & Gold Entry Aspects
+    asp_code, asp_resp = api_get(
+        f"https://dataplex.googleapis.com/v1/projects/{project_id}/locations/{region}/aspectTypes/medallion-governance-template",
+        access_token,
+        project_id,
+    )
+    ent_code, gold_ent = api_get(
+        f"https://dataplex.googleapis.com/v1/projects/{project_id}/locations/{region}/entryGroups/@bigquery/entries/"
+        f"bigquery.googleapis.com/projects/{project_id}/datasets/fraud_features_gold/tables/gold_fraud_features?view=ALL",
+        access_token,
+        project_id,
+    )
+
+    # 4. Dataplex Lakes & Data Products
+    lakes_code, lakes_resp = api_get(
+        f"https://dataplex.googleapis.com/v1/projects/{project_id}/locations/{region}/lakes",
+        access_token,
+        project_id,
+    )
+    dp_code, dp_resp = api_get(
+        f"https://dataplex.googleapis.com/v1/projects/{project_id}/locations/{region}/dataProducts",
+        access_token,
+        project_id,
+    )
+
+    # 5. Dataplex Auto Data Quality Scans
+    scans_code, scans_resp = api_get(
+        f"https://dataplex.googleapis.com/v1/projects/{project_id}/locations/{region}/dataScans",
+        access_token,
+        project_id,
+    )
+
+    # 6. Data Lineage Processes
+    lineage_processes = {}
+    for loc in (region, "us"):
+        lin_code, lin_resp = api_get(
+            f"https://datalineage.googleapis.com/v1/projects/{project_id}/locations/{loc}/processes",
+            access_token,
+            project_id,
+        )
+        lineage_processes[loc] = {
+            "status_code": lin_code,
+            "processes": lin_resp.get("processes", []) if isinstance(lin_resp, dict) else [],
+            "raw": lin_resp,
+        }
+
+    telemetry = {
+        "project_id": project_id,
+        "region": region,
+        "composer_dag": {
+            "gcs_uri": dag_gcs_uri,
+            "staged_in_gcs": dag_staged_in_gcs,
+        },
+        "bronze_policy_tags": bronze_policy_tags,
+        "aspect_type": {
+            "status_code": asp_code,
+            "response": asp_resp,
+        },
+        "gold_dataplex_entry": {
+            "status_code": ent_code,
+            "response": gold_ent,
+        },
+        "dataplex_lakes": {
+            "status_code": lakes_code,
+            "response": lakes_resp,
+        },
+        "dataplex_data_products": {
+            "status_code": dp_code,
+            "response": dp_resp,
+        },
+        "dataplex_data_scans": {
+            "status_code": scans_code,
+            "response": scans_resp,
+        },
+        "data_lineage": lineage_processes,
+    }
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     signature = calculate_signature(student_ldap, LAB, EVAL_NAME, created_at, SALT)
@@ -290,13 +475,9 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        for root, _, files in os.walk("src/stream-clickstream"):
-            for f in files:
-                filepath = os.path.join(root, f)
-                z.write(filepath, filepath)
-                z.write(filepath, os.path.basename(filepath))
-        if os.path.isfile("agent-config.json"):
-            z.write("agent-config.json", "agent-config.json")
+        z.writestr("governance_composer_lineage.json", json.dumps(telemetry, indent=2))
+        if dag_content:
+            z.writestr("medallion_lakehouse_dag.py", dag_content)
 
     return created_at, signature
 
@@ -306,7 +487,7 @@ def main():
     zip_path = os.path.join(script_dir, ZIP_FILENAME)
 
     print("=======================================================")
-    print(f" Lab Evaluation: L400-agentic-solution-eng - streaming_simulator_code")
+    print(f" Lab Evaluation: {LAB} - {EVAL_NAME}")
     print("=======================================================")
 
     student_account, student_ldap = get_student_identity()
