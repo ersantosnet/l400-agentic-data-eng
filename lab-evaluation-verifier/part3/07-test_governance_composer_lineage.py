@@ -20,8 +20,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-da-data-engineering-part3"
-EVAL_NAME = "governance_composer_lineage"
+LAB = "L400-agentic-data-eng"
+EVAL_NAME = "part3_governance_composer_lineage"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",

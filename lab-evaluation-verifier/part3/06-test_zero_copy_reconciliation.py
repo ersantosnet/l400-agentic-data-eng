@@ -19,8 +19,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-da-data-engineering-part3"
-EVAL_NAME = "zero_copy_reconciliation"
+LAB = "L400-agentic-data-eng"
+EVAL_NAME = "part3_zero_copy_reconciliation"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",

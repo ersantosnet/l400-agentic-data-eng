@@ -18,8 +18,8 @@ import urllib.error
 import ssl
 from datetime import datetime, timezone
 
-LAB = "L400-da-data-engineering-part1"
-EVAL_NAME = "remediated_serverless_batch"
+LAB = "L400-agentic-data-eng"
+EVAL_NAME = "part1_remediated_serverless_batch"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
