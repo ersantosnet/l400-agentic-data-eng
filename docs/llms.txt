@@ -1,23 +1,67 @@
-# [PROJECT_NAME] - System Architecture & Context
-> **INSTRUCTIONS FOR AI AGENTS:** This file is currently a template. Your first task in a new project is to read the raw customer requirements located in `docs/requirements/` and completely overwrite this file with the actual business and technical context of the new system. Remove this instruction block once completed.
+# ACME Global Payment Fraud Lakehouse - System Architecture & Context
 
 ## 1. Project Overview & Business Value
-- **Customer / Project Name:** [Fill in from requirements]
-- **Business Goal:** [What is the customer trying to achieve? e.g., "Reduce ML model training time" or "Build a real-time fraud detection pipeline"]
-- **Primary Users:** [Who will use this system? e.g., Data Scientists, external customers, internal BI team]
+- **Customer / Project Name:** ACME Inc. — Global Payment Fraud Medallion Lakehouse (`acme-l400-part3-eri-01`)
+- **Business Goal:** Build an enterprise-grade, zero-trust Medallion Lakehouse (`dev` environment) processing 15,506,500 raw payment/auth/dispute/CRM/merchant records into 14,875,000 clean Silver records and 518,638 curated Gold customer-payment fraud features with $0.00 financial variance and zero cleartext PII leakage.
+- **Primary Users:** Fraud Prevention Engineering Squad, Gemini Enterprise Agent Platform, Looker BI Dashboards, Compliance & Risk Auditors.
 
 ## 2. Infrastructure Topology (GCP Services Used)
-[List the Google Cloud services that will be provisioned by Terraform in this solution. Example:]
-- **Storage:** [e.g., Cloud Storage, BigQuery]
-- **Compute / Processing:** [e.g., Cloud Run, Dataflow, Dataproc]
-- **AI / ML:** [e.g., Vertex AI, Gemini API, Colab Enterprise]
-- **Networking:** [e.g., Shared VPC, Cloud NAT]
+- **GCP Project & Region:** `acme-l400-part3-eri-01` (`us-central1`)
+- **Storage & Lakehouse Catalogs:**
+  - Cloud Storage Raw Landing: `gs://acme-l400-part3-eri-01-raw-landing/v0.01/`
+  - Cloud Storage Lakehouse Warehouse: `gs://acme-l400-part3-eri-01-lakehouse-warehouse/` (`bronze_dev/warehouse`, `silver_dev/warehouse`, `dags/`)
+  - Cloud Storage Spark Event Logs: `gs://acme-l400-part3-eri-01-spark-event-logs`
+  - Bronze BigLake Iceberg REST Catalog: `acme_bronze_dev` (`bl://projects/acme-l400-part3-eri-01/catalogs/acme_bronze_dev`)
+  - Silver BigLake Iceberg REST Catalog: `acme_silver_dev` (`bl://projects/acme-l400-part3-eri-01/catalogs/acme_silver_dev`)
+  - BigQuery Cloud Resource Connection (Credential Vending): `projects/acme-l400-part3-eri-01/locations/us-central1/connections/lakehouse-vending-conn`
+  - BigQuery Datasets: `fraud_detection_db` (10 Bronze/Silver BigLake Iceberg tables) and `fraud_features_gold` (1 Gold native table `gold_fraud_features`)
+- **Compute / Processing:**
+  - Managed Dataproc Serverless Spark 2.3 Premium Tier with Lightning Engine (`spark.dataproc.engine=lightningEngine`, `spark.dataproc.cohort=fraud_benchmark`)
+  - BigQuery Native SQL & `dbt-bigquery` (`src/dbt/`)
+  - Cloud Composer 3 (`acme_medallion_lakehouse_hourly` DAG in `src/orchestration/medallion_lakehouse_dag.py`)
+- **Governance & Data Mesh:**
+  - Dataplex Knowledge Catalog Pattern 2: Domain `FraudDomain`, Data Product `FraudRiskFeatureStore`, Aspect `medallion-governance-template` attached to all 11 BigQuery tables
+  - Dataplex Policy Tag `SSN_Cardholder` (`pii_taxonomy`) with BigQuery `SHA256` Dynamic Data Masking on Bronze SSN columns
+  - Dataplex Auto Data Quality Scan `fraud-gold-dq-scan-dev` (`src/governance/dq_rules.yaml`)
+- **Networking & Identity:**
+  - VPC Subnet: `acme-part3-subnet`
+  - Dataproc Service Account: `sa-dataproc-serverless@acme-l400-part3-eri-01.iam.gserviceaccount.com` (zero static JSON keys; `--credential-mode=vended-credentials`)
 
 ## 3. Core Data Flow & Schemas
-[Describe how data moves through the system. Detail the major data models.]
-1. **Ingestion:** [Where does the data come from? e.g., "Pub/Sub stream from on-prem Kafka"]
-2. **Processing:** [How is it transformed? e.g., "Dataflow job cleaning JSON payloads"]
-3. **Storage:** [Where does it land? e.g., "BigQuery dataset `raw_events`"]
-- **Primary Data Shape (Example):**
+1. **Ingestion (Bronze — `src/pipelines/01_bronze_ingest.py`):**
+   - Lossless 1:1 ingestion of 5 raw feeds (15,506,500 total rows) from `gs://acme-l400-part3-eri-01-raw-landing/v0.01/` into permissive all-`STRING` Apache Iceberg V2 tables in `acme_bronze_dev.fraud_detection_db` with `_ingestion_timestamp` and `_source_file`:
+     - `customers_crm_bronze` (510,000 rows)
+     - `merchants_stores_bronze` (26,000 rows, multi-line CSV)
+     - `device_auth_logs_bronze` (4,120,000 rows)
+     - `payment_transactions_bronze` (10,490,000 rows)
+     - `chargeback_disputes_bronze` (360,500 rows)
+2. **Processing & Cleansing (Silver — `src/pipelines/02_silver_transform.py`):**
+   - Vectorized Spark SQL sanitization (zero Python UDFs), 4-Class Null filtering (drops 119,000 corrupt rows, preserves 2,750,000 benign optional nulls), accounting parentheses reversal (`($x)` -> `-x`), `DECIMAL(18,2)` financial casting, window deduplication (removes 512,500 duplicates), Haversine `geo_distance_km`, 1-hour sliding window `velocity_1h`, SHA-256 pseudonymization (`masked_ssn`, `masked_email`), and complete removal of raw `ssn` and `email` columns into Iceberg V2 Merge-on-Read (MoR) tables in `acme_silver_dev.fraud_detection_db` (14,875,000 total rows: 500k customers, 25k merchants, 4M auth logs, 10M transactions, 350k disputes).
+3. **Storage & Feature Engineering (Gold — `src/sql/gold_fraud_features.sql` & `src/dbt/`):**
+   - Pre-aggregates `chargeback_disputes_silver` by `transaction_id` (`disputes_by_tx` CTE) to prevent fan-out, joins Silver tables, and materializes 518,638 customer-payment feature rows across 233,945 distinct customers in `fraud_features_gold.gold_fraud_features` (`CLUSTER BY customer_id, loyalty_tier`).
+   - Reconciles penny-exact (`$0.00` variance, `0` row variance) against Silver across 10,000,000 transactions (`$8,069,098,864.39` gross, `$8,059,136,414.39` net, `$598,467,476.02` disputed).
+- **Primary Gold Schema (`fraud_features_gold.gold_fraud_features`):**
   ```json
-  // [Insert core payload JSON or schema definition here so agents know the data structure]
+  {
+    "customer_id": "STRING",
+    "masked_ssn": "STRING (64-char hex SHA-256)",
+    "masked_email": "STRING (64-char hex SHA-256)",
+    "loyalty_tier": "STRING (coalesced to UNASSIGNED)",
+    "payment_method": "INT64 (0=Credit, 1=Debit, 2=Mobile Wallet)",
+    "total_tx_count": "INT64",
+    "total_tx_amount": "NUMERIC(14,2)",
+    "total_net_amount": "NUMERIC(14,2)",
+    "avg_tx_amount": "NUMERIC(10,2)",
+    "high_risk_mcc_tx_count": "INT64",
+    "high_risk_mcc_amount": "NUMERIC(14,2)",
+    "ato_mfa_tx_count": "INT64",
+    "ato_mfa_tx_amount": "NUMERIC(14,2)",
+    "disputed_tx_count": "INT64",
+    "total_disputed_amount": "NUMERIC(14,2)",
+    "total_penalty_fee_usd": "NUMERIC(10,2)",
+    "peak_velocity_1h": "INT64",
+    "max_geo_distance_km": "FLOAT64",
+    "high_velocity_risk_flag": "BOOLEAN",
+    "feature_refreshed_at": "TIMESTAMP"
+  }
+  ```

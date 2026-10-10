@@ -1,19 +1,24 @@
 {
-    "description-of-this-file" : "This file is used to configure the agent (AGY).  It will get updated after each Terraform deploy.  You can add values to the file.",
-
-    "random_string" : "{random_string}",
-
-    "gcp-project-id" : "{project_id}",
-
-    "bigquery-region" : "{multi_region}",
-    "bigquery-dataset" : "l400_agentic_se",
-    
-    "knowledge-catalog-region" : "us-central1",
-
-    "data-profile-region" : "us-central1",
-
-    "business-glossary-region" : "global",
-    "business-glossary-id" : "{project_id}",
-
-    "data-bucket" : "l400-agentic-se-data-{random_string}"
+  "description-of-this-file": "This file is used to configure the agent (AGY). It will get updated after each Terraform deploy. You can add values to the file.",
+  "random_string": "eri-01",
+  "gcp-project-id": "acme-l400-part3-eri-01",
+  "primary-region": "us-central1",
+  "env": "dev",
+  "raw-landing-bucket": "acme-l400-part3-eri-01-raw-landing",
+  "lakehouse-warehouse-bucket": "acme-l400-part3-eri-01-lakehouse-warehouse",
+  "spark-event-logs-bucket": "acme-l400-part3-eri-01-spark-event-logs",
+  "biglake-bronze-catalog": "acme_bronze_dev",
+  "biglake-silver-catalog": "acme_silver_dev",
+  "bigquery-lakehouse-dataset": "fraud_detection_db",
+  "bigquery-gold-dataset": "fraud_features_gold",
+  "bigquery-region": "us-central1",
+  "bigquery-dataset": "fraud_detection_db",
+  "knowledge-catalog-region": "us-central1",
+  "knowledge-catalog-domain": "FraudDomain",
+  "knowledge-catalog-data-product": "FraudRiskFeatureStore",
+  "knowledge-catalog-aspect": "medallion-governance-template",
+  "data-profile-region": "us-central1",
+  "business-glossary-region": "global",
+  "business-glossary-id": "acme-l400-part3-eri-01",
+  "data-bucket": "acme-l400-part3-eri-01-lakehouse-warehouse"
 }

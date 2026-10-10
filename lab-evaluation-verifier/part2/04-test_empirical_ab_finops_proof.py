@@ -16,6 +16,7 @@ import subprocess
 import urllib.request
 import urllib.error
 import ssl
+import time
 from datetime import datetime, timezone
 
 LAB = "L400-agentic-data-eng"
@@ -127,14 +128,26 @@ def get_gcp_context() -> tuple[str, str, str]:
         elif arg.startswith("--region="):
             region = arg.split("=", 1)[1].strip()
 
-    for cfg_path in ("agent-config.json", "../agent-config.json", "../../agent-config.json"):
+    script_root = os.path.dirname(os.path.abspath(__file__))
+    for cfg_path in (
+        "agent-config.json",
+        "../agent-config.json",
+        "../../agent-config.json",
+        os.path.join(script_root, "../../agent-config.json"),
+    ):
         if os.path.exists(cfg_path):
             try:
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
                     project_id = project_id or cfg.get("gcp-project-id", "")
                     dataset = dataset or cfg.get("bigquery-dataset", "")
-                    region = region or cfg.get("cloud-run-region") or cfg.get("artifact-registry-location", "")
+                    region = (
+                        region
+                        or cfg.get("primary-region")
+                        or cfg.get("bigquery-region")
+                        or cfg.get("cloud-run-region")
+                        or cfg.get("artifact-registry-location", "")
+                    )
             except Exception:
                 pass
 
@@ -368,17 +381,21 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
 
 def main():
+    start_time = time.time()
     script_dir = os.path.dirname(os.path.abspath(__file__))
     zip_path = os.path.join(script_dir, ZIP_FILENAME)
+    project_id, _, region = get_gcp_context()
 
     print("=======================================================")
     print(f" Lab Evaluation: {LAB} - {EVAL_NAME}")
+    print(f" Target Project: {project_id or 'unknown'} ({region})")
     print("=======================================================")
 
     student_account, student_ldap = get_student_identity()
     created_at, signature = create_bundle(zip_path, student_account, student_ldap)
 
     print(f"✔ Created evaluation package: {ZIP_FILENAME}")
+    print(f"  Target Project:   {project_id or 'unknown'} ({region})")
     print(f"  Student Identity: {student_ldap} ({student_account})")
     print(f"  Timestamp:        {created_at}")
     print("")
@@ -415,7 +432,8 @@ def main():
             print("")
         print_manual_instructions(ZIP_FILENAME)
 
-    print("\nDone!")
+    elapsed = time.time() - start_time
+    print(f"\nDone! (Project: {project_id or 'unknown'} | Elapsed: {elapsed:.2f}s)")
 
 
 if __name__ == "__main__":

@@ -29,7 +29,9 @@ graphify-out/.graphify_extract.json
 graphify-out/.graphify_labels.json
 graphify-out/.graphify_semantic.json
 
-lab-evaluation-verifier/*.zip
+lab-evaluation-verifier/**/*.zip
+lab-evaluation-verifier/**/trash/
+lab-evaluation-verifier-bkp/
 
 # Python & Jupyter
 __pycache__/
