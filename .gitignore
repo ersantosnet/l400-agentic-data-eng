@@ -1,42 +1,40 @@
+# OS & Editor files
 .DS_Store
-key-file-*.json
-
-terraform/.terraform/*
-terraform/.terraform.lock.hcl
-terraform/terraform.tfstate
-terraform/.terraform.tfstate.lock.info
-terraform/terraform.tfstate.backup
-terraform/tf-output.json
-
-tf.log
-terraform-modules/colab-deployment-create-files/notebooks/*
-terraform-modules/colab-deployment-create-files/notebooks_base64/*
-
-.venv/*
 .vscode/*
-
 tmp/*
 
-graphify-out/cache/*
-graphify-out/.graphify_python
-graphify-out/.graphify_root
-graphify-out/cost.json
-graphify-out/manifest.json
-graphify-out/.graphify_analysis.json
-graphify-out/.graphify_ast.json
-graphify-out/.graphify_detect.json
-graphify-out/.graphify_extract.json
-graphify-out/.graphify_labels.json
-graphify-out/.graphify_semantic.json
+# Zero Secrets Policy (NEVER commit credentials, keys, env files, cookies, or session DBs)
+.env
+.env.*
+.env.local
+.env.*.local
+!.env.example
+key-file-*.json
+*service_account*.json
+*sa*.json
+*credentials*.json
+*.key
+*.pem
+*.pkcs12
+*cookies*
+.notebooklm/
+.adk/
+**/*.sqlite3
+*.db-journal
 
-lab-evaluation-verifier/**/*.zip
-lab-evaluation-verifier/**/trash/
-lab-evaluation-verifier-bkp/
-
-# Python & Jupyter
+# Python, Virtual Environments & dbt
+.venv/
+spark_env/
 __pycache__/
 *.py[cod]
 *$py.class
 .ipynb_checkpoints/
 .jupyter/
-spark_env/
+target/
+dbt_packages/
+logs/
+
+# Protected Lab Evaluator Artifacts
+lab-evaluation-verifier/**/*.zip
+lab-evaluation-verifier/**/trash/
+lab-evaluation-verifier-bkp/
