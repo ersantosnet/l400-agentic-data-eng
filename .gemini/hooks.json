@@ -1,0 +1,17 @@
+{
+  "l400-lab-guardrails": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "view_file|replace_file_content|write_to_file|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f hooks/guardrails.py ]; then python3 hooks/guardrails.py; else python3 .gemini/hooks/guardrails.py; fi",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
