@@ -2,6 +2,7 @@
 name: l400-code-reviewer
 description: "Specialized read-only L400 Principal Data Engineering Code Reviewer. Invoke this subagent via invoke_subagent to audit PySpark scripts, BigQuery SQL, dbt models, and Airflow DAGs against `.gemini/rules/` without cluttering the main conversation context."
 tools:
+  - read_file
   - view_file
   - code_search
 mainAgent: false

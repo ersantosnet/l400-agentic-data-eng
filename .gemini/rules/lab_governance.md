@@ -29,5 +29,6 @@ To keep the repository organized across all three labs, NEVER dump scripts, SQL 
   - Qualification reports (`AppsRecommendedForBoost.tsv`, `roi_summary.json`, analysis docs): `docs/part2/`
   - Cloud Composer Airflow DAGs & benchmark scripts: `src/part2/`
 - **Part 3 — The Build (Medallion Lakehouse Architecture):**
-  - EDA profile reports, Schema Mapping Manifesto, & architecture design docs: `docs/part3/`
-  - Lakehouse implementation code: `src/part3/` (organized into sub-directories such as `src/part3/pipelines/`, `src/part3/sql/`, `src/part3/dbt/`, `src/part3/governance/`, `src/part3/orchestration/`).
+  - Spec-Driven Planning Documents (`DISCOVERY.md`, `EDA.md`, `SPEC.md` initialized from `DISCOVERY-template.md`, `EDA-template.md`, `SPEC-template.md`): `docs/part3/`
+  - Lakehouse implementation code: `src/part3/` (organized into `src/part3/scripts/`, `src/part3/dbt_project/`, `src/part3/sql/`, `src/part3/dags/`, and `src/part3/dq_rules.yaml`).
+

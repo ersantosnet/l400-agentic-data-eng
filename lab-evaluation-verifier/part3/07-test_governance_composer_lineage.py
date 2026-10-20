@@ -358,8 +358,12 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
             dag_content = cat_proc.stdout
     if not dag_content:
         for local_cand in (
+            "src/part3/dags/medallion_lakehouse_dag.py",
+            "src/part3/medallion_lakehouse_dag.py",
             "dags/medallion_lakehouse_dag.py",
             "scripts/medallion_lakehouse_dag.py",
+            "../../src/part3/dags/medallion_lakehouse_dag.py",
+            "../../src/part3/medallion_lakehouse_dag.py",
             "../../dags/medallion_lakehouse_dag.py",
             "../../scripts/medallion_lakehouse_dag.py",
             "../../lab-packs/part3/solution/medallion_lakehouse_dag.py",

@@ -1,9 +1,9 @@
 ---
-description: Standards for BigLake Metastore, Apache Iceberg tables, PII masking, and Dataplex Knowledge Catalog governance in Part 3.
+description: Standards for Google Lakehouse (Apache Iceberg REST Catalogs), PII masking, and Dataplex Knowledge Catalog governance in Part 3.
 trigger: model_decision
 ---
 
-# BigLake Metastore, Apache Iceberg & Governance Standards
+# Google Lakehouse, Apache Iceberg & Governance Standards
 
 ## 1. Platform Mechanics (Pre-Configured)
 - **Skill & MCP Usage:** Activate `schema-mapping` before building multi-table transformations, `data-autocleaning` when designing Silver quality rules, and `datacloud_knowledge_catalog_remote` / `discovering-gcp-data-assets` when inspecting catalogs.
@@ -11,10 +11,10 @@ trigger: model_decision
 
 ---
 
-## 2. Apache Iceberg & BigLake Catalog Configuration (Part 3)
+## 2. Apache Iceberg & Google Lakehouse Catalog Configuration (Part 3)
 <!-- TODO (CE - Part 3): Complete the Iceberg catalog configuration standards below based on your architecture design and discovery.
 Guiding questions to address in your rules:
-1. Are we using a single Iceberg catalog or separate catalogs for Bronze and Silver? What Spark Session properties (spark.sql.catalog.<name>...) are required for BigLake Metastore / Iceberg REST catalog with vended credentials?
+1. Are we using a single Iceberg catalog or separate catalogs for Bronze and Silver? What Spark Session properties (spark.sql.catalog.<name>...) are required for Google Lakehouse / Iceberg REST catalogs with vended credentials?
 2. What warehouse paths and namespace conventions should be used for Bronze vs. Silver tables?
 3. Which Iceberg format-version and write/merge properties (e.g., copy-on-write vs. merge-on-read) should Silver tables use?
 -->

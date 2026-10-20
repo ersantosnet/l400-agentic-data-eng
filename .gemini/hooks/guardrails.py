@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
 Deterministic PreToolUse Lifecycle Hook for L400 Agentic Data Engineering.
+Supports both Jetski (`read_file`, `edit_file`, `write_file`, `code_search`, `run_command`)
+and Antigravity (`view_file`, `replace_file_content`, `write_to_file`, `grep_search`,
+`find_by_name`, `list_dir`, `run_command`) tool schemas.
+
 Enforces:
 1. Evaluator Blind Spot (blocks access to lab-evaluation-verifier*, proxy.py, and hook self-tampering)
 2. Zero Secrets Policy on git add / git commit commands
@@ -34,22 +38,32 @@ def main() -> None:
     tool_name = tool_call.get("name", "")
     args = tool_call.get("args", {}) or {}
 
-    # 1. Check file path arguments on file tools
-    target_path = args.get("AbsolutePath") or args.get("TargetFile") or ""
-    for pattern in BLIND_SPOT_PATTERNS:
-        if re.search(pattern, target_path):
-            print(
-                json.dumps(
-                    {
-                        "decision": "deny",
-                        "reason": (
-                            f"Blocked by L400 Lab Governance Policy: '{target_path}' is part of the "
-                            "protected lab evaluation infrastructure."
-                        ),
-                    }
+    # 1. Check path/query arguments across both Jetski and Antigravity file/search tools
+    candidate_fields = (
+        args.get("Path"),
+        args.get("AbsolutePath"),
+        args.get("TargetFile"),
+        args.get("SearchPath"),
+        args.get("DirectoryPath"),
+        args.get("Query"),
+    )
+    for field_val in candidate_fields:
+        if not field_val or not isinstance(field_val, str):
+            continue
+        for pattern in BLIND_SPOT_PATTERNS:
+            if re.search(pattern, field_val):
+                print(
+                    json.dumps(
+                        {
+                            "decision": "deny",
+                            "reason": (
+                                f"Blocked by L400 Lab Governance Policy: '{field_val}' references "
+                                "protected lab evaluation infrastructure."
+                            ),
+                        }
+                    )
                 )
-            )
-            return
+                return
 
     # 2. Check shell commands on run_command
     if tool_name == "run_command":

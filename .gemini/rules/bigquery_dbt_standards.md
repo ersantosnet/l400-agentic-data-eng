@@ -1,5 +1,5 @@
 ---
-description: Standards for BigQuery SQL optimization, BigLake external tables, dbt-bigquery Gold layer modeling, and financial reconciliation in Part 3.
+description: Standards for BigQuery SQL optimization, Google Lakehouse external tables, dbt-bigquery Gold layer modeling, and financial reconciliation in Part 3.
 trigger: model_decision
 ---
 
@@ -11,7 +11,7 @@ trigger: model_decision
 
 ---
 
-## 2. BigLake External Tables & Gold Feature Mart Modeling (Part 3)
+## 2. Google Lakehouse External Tables & Gold Feature Mart Modeling (Part 3)
 <!-- TODO (CE - Part 3): Define the BigQuery and dbt modeling standards for the Gold layer based on your Silver-to-Gold architecture design.
 Guiding questions to address in your rules:
 1. How are the Silver Iceberg tables exposed to BigQuery, and where does the Gold feature mart live?

@@ -330,8 +330,12 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
         source_location = gcs_uri
     else:
         for local_candidate in (
+            "src/part1/orders_enrichment_fixed.py",
+            "src/part1/scripts/orders_enrichment_fixed.py",
             "scripts/orders_enrichment_fixed.py",
             "../scripts/orders_enrichment_fixed.py",
+            "../../src/part1/orders_enrichment_fixed.py",
+            "../../src/part1/scripts/orders_enrichment_fixed.py",
             "../../scripts/orders_enrichment_fixed.py",
         ):
             if os.path.isfile(local_candidate):

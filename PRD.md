@@ -1,7 +1,7 @@
 # Product Requirements Document (PRD) — L400 Agentic Data Engineering
 
 > **Instructions for Customer Engineers (CEs):**
-> This `PRD.md` serves as your living architectural specification across **Part 1**, **Part 2**, and **Part 3** of the L400 Agentic Data Engineering workshop. Work with your AI Agent to fill in the `TODO (CE)` sections below as you complete discovery and design checkpoints in each lab.
+> Use this `PRD.md` as your living architectural specification for **Part 1** and **Part 2**, and follow the dedicated 3-document Spec-Driven workflow in **`docs/part3/`** (`DISCOVERY.md` $\rightarrow$ `EDA.md` $\rightarrow$ `SPEC.md`) for **Part 3**.
 
 ---
 
@@ -31,23 +31,11 @@
 
 ---
 
-## 🏗️ Part 3: The Build — Agentic Medallion Lakehouse Architecture
-<!-- TODO (CE - Part 3): After reviewing the Part 3 lab instructions and profiling the raw landing zone data in GCS, collaborate with your agent to generate the complete Medallion Lakehouse PRD here. -->
+## 🏗️ Part 3: The Build — Agentic Medallion Lakehouse (Managed in `docs/part3/`)
 
-### 3.1 Business Context & Target Architecture
-- **Business Objective:** `TODO (CE)`
-- **Storage & Catalog Topology (Raw GCS -> Bronze Iceberg -> Silver Iceberg -> Gold BigQuery/dbt):** `TODO (CE)`
+For **Part 3**, follow the **8-Step Agentic Data Engineering Lifecycle** on the workshop portal and author your three specification documents directly inside `docs/part3/` using the included un-spoiled templates:
 
-### 3.2 Raw Data Profile & Silver Data-Hygiene Contract
-- **Raw Feeds & Row Counts:** `TODO (CE)`
-- **Null Handling, Deduplication & Type Sanitization Rules:** `TODO (CE)`
-- **PII Masking & Column Dropping Policy:** `TODO (CE)`
-
-### 3.3 Gold Feature Mart & Cross-Layer Reconciliation
-- **Gold Table Grain, Pre-Aggregation CTEs & Clustering:** `TODO (CE)`
-- **Silver-to-Gold Financial Invariance Targets:** `TODO (CE)`
-
-### 3.4 Data Mesh Governance, Auto Data Quality & Composer Orchestration
-- **Knowledge Catalog Domains, Data Products & Aspects:** `TODO (CE)`
-- **Dataplex Auto Data Quality Rules:** `TODO (CE)`
-- **Cloud Composer End-to-End DAG Specification:** `TODO (CE)`
+1. **Step 01 — Customer Discovery (`docs/part3/DISCOVERY.md`):** Initialize from [`docs/part3/DISCOVERY-template.md`](docs/part3/DISCOVERY-template.md) (`§0–§16`) to synthesize Devon Patel's brief and all 15 Lakehouse Discovery Checkpoints.
+2. **Step 02 — Exploratory Data Analysis (`docs/part3/EDA.md`):** Initialize from [`docs/part3/EDA-template.md`](docs/part3/EDA-template.md) (`§0–§10`) to record empirical data profiling across all 5 raw feeds in `gs://${PROJECT_ID}-raw-landing/v0.01/`.
+3. **Step 03 — Master Technical Specification (`docs/part3/SPEC.md`):** Initialize from [`docs/part3/SPEC-template.md`](docs/part3/SPEC-template.md) (`§0–§9`) to define the complete Schema Mapping Manifesto and target codebase contract under `src/part3/{scripts,dbt_project,sql,dags}/`.
+   - *Tip:* Upload or paste each document into the **Planning Document Review & AI Coaching** panel on `/part3` before starting Step 04 code generation!

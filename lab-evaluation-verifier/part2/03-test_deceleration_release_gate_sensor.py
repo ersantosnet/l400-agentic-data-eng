@@ -335,10 +335,16 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
 
     if not dag_code:
         local_candidates = [
+            "src/part2/dags/nqe_benchmark_dag.py",
+            "src/part2/scripts/nqe_benchmark_dag.py",
+            "src/part2/nqe_benchmark_dag.py",
             "dags/nqe_benchmark_dag.py",
             "scripts/nqe_benchmark_dag.py",
             "../dags/nqe_benchmark_dag.py",
             "../scripts/nqe_benchmark_dag.py",
+            "../../src/part2/dags/nqe_benchmark_dag.py",
+            "../../src/part2/scripts/nqe_benchmark_dag.py",
+            "../../src/part2/nqe_benchmark_dag.py",
             "../../dags/nqe_benchmark_dag.py",
             "../../scripts/nqe_benchmark_dag.py",
         ]
