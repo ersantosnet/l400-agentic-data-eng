@@ -17,7 +17,7 @@ import sys
 BLIND_SPOT_PATTERNS = [
     r"lab-evaluation-verifier",
     r"(^|/|\\|\s)proxy\.py(\s|$|\"|')",
-    r"\.gemini/hooks",
+    r"\.agents/hooks",
 ]
 
 SECRET_GIT_PATTERNS = [

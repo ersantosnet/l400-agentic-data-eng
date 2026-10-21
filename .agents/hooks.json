@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f hooks/guardrails.py ]; then python3 hooks/guardrails.py; else python3 .gemini/hooks/guardrails.py; fi",
+            "command": "if [ -f hooks/guardrails.py ]; then python3 hooks/guardrails.py; else python3 .agents/hooks/guardrails.py; fi",
             "timeout": 5
           }
         ]
