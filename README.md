@@ -38,6 +38,8 @@ Welcome to the **L400 Agentic Data Engineering in Google Cloud** hands-on worksp
 │       ├── DISCOVERY-template.md        # Step 01 skeleton (§0–§16) -> copy/fill to create DISCOVERY.md
 │       ├── EDA-template.md              # Step 02 skeleton (§0–§10) -> copy/fill to create EDA.md
 │       └── SPEC-template.md             # Step 03 skeleton (§0–§9)  -> copy/fill to create SPEC.md
+├── lab-packs/                           # Self-contained lab environment deployment bundles (deploy-all-labs.sh)
+├── lab-evaluation-verifier/             # Automated Pass/Fail CLI evaluators (setup/, part1/, part2/, part3/)
 └── src/
     ├── part1/                           # Part 1 remediated PySpark & validation scripts
     ├── part2/                           # Part 2 qualification scripts & Cloud Composer DAGs
