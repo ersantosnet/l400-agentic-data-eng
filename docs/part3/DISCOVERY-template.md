@@ -4,7 +4,7 @@
 | Metadata Field | Value |
 | :--- | :--- |
 | **Document ID / Filename** | `docs/part3/DISCOVERY.md` (Step 01 of the 8-Step Agentic Data Engineering Lifecycle) |
-| **Target GCP Project & Region** | `<TODO: project_id>` • `us-central1` • Initial Environment: `<TODO: dev / qa / prod>` |
+| **Target GCP Project & Region** | `<TODO: project_id>` • `<TODO: region (default: us-central1)>` • Initial Environment: `<TODO: dev / qa / prod>` |
 | **Customer Stakeholders** | **Devon Patel**, **Marcus Vance**, **Sonia Chen** |
 | **Source Artifacts Synthesized** | (Devon Patel's Architectural Brief, 15 Lakehouse Discovery Checkpoints, Pre-Provisioned Environment Inventory) |
 

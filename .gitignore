@@ -34,6 +34,18 @@ target/
 dbt_packages/
 logs/
 
+# Lab Provisioner & Terraform Runtime Artifacts
+**/trash/
+lab-packs/.lab-env.json
+lab-packs/part1-troubleshoot/
+lab-packs/part2-qualification/
+lab-packs/part3-medallion/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
 # Protected Lab Evaluator Artifacts
 lab-evaluation-verifier/**/*.zip
 lab-evaluation-verifier/**/trash/

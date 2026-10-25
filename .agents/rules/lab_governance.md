@@ -14,14 +14,14 @@ You are assisting a Customer Engineer (CE) in a multi-part, hands-on L400 Agenti
 
 ## 2. Pacing, Clarify-First & Plan-First Execution
 - **Never Jump Ahead:** Only execute the specific lab part and checkpoint requested by the user. Do not pre-build downstream pipelines or future stages unprompted.
-- **Check `.agents/rules/` & `PRD.md` TODOs:** When a task relies on `PRD.md` or a domain rule file (`.agents/rules/spark_standards.md`, `.agents/rules/lakehouse_standards.md`, `.agents/rules/bigquery_dbt_standards.md`) that still has uncompleted `<!-- TODO (CE): ... -->` placeholders for that checkpoint, collaborate with the user to fill in or clarify those engineering rules before generating pipeline code.
+- **Check `.agents/rules/` & `docs/part3/` TODOs:** When a task relies on `docs/part3/{DISCOVERY,EDA,SPEC}.md` or a domain rule file (`.agents/rules/spark_standards.md`, `.agents/rules/lakehouse_standards.md`, `.agents/rules/bigquery_dbt_standards.md`) that still has uncompleted `<!-- TODO (CE): ... -->` placeholders for that checkpoint, collaborate with the user to fill in or clarify those engineering rules before generating pipeline code.
 - **Always Present a Plan:** Follow `@.agents/rules/always_create_plan.md` before creating/modifying scripts or submitting cloud jobs.
 
 ## 3. Multi-Lab Directory Structure (`part1`, `part2`, `part3`)
 To keep the repository organized across all three labs, NEVER dump scripts, SQL files, TSVs, or JSON reports into the project root. Route all deliverables into the corresponding lab part directory:
 
 - **Root Directory (Protected):**
-  - Only top-level configuration and documentation files belong in root (`AGENTS.md`, `GEMINI.md`, `CLAUDE.md`, `PRD.md`, `README.md`, `proxy.py`).
+  - Only top-level configuration and documentation files belong in root (`AGENTS.md`, `GEMINI.md`, `CLAUDE.md`, `README.md`, `proxy.py`).
 - **Part 1 — The Troubleshoot (Spark & Lightning Engine RCA):**
   - Documentation, RCA reports & query plans: `docs/part1/`
   - Remediated PySpark scripts & validation scripts: `src/part1/`

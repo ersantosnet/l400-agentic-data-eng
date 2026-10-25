@@ -13,7 +13,6 @@ Welcome to the **L400 Agentic Data Engineering in Google Cloud** hands-on worksp
 ```text
 .
 ├── AGENTS.md                            # Primary AI Agent Constitution & Router (symlinked by GEMINI.md & CLAUDE.md)
-├── PRD.md                               # Living Product Requirements Document (Parts 1 & 2; links to docs/part3/)
 ├── .env.example                         # Example local environment variables template
 ├── .agents/
 │   ├── agents/
@@ -56,7 +55,7 @@ Welcome to the **L400 Agentic Data Engineering in Google Cloud** hands-on worksp
 ## 🚀 How to Work with Your AI Agent
 
 1. **Follow the Lab Portal Instructions:** Each lab checkpoint on the workshop portal defines the business problem and verification goals.
-2. **Practice Spec-Driven & Context Engineering (`.agents/rules/`, `PRD.md`, & `docs/part3/`):**
+2. **Practice Spec-Driven & Context Engineering (`.agents/rules/` & `docs/part3/`):**
    - Inspect the domain rule files inside `.agents/rules/` (`spark_standards.md`, `lakehouse_standards.md`, `bigquery_dbt_standards.md`).
    - In **Part 3**, collaborate with your agent to generate `docs/part3/DISCOVERY.md`, `docs/part3/EDA.md`, and `docs/part3/SPEC.md` directly from the included `*-template.md` skeletons, then validate each document with the **Planning Document Review & AI Coaching** tool on `/part3` before generating pipeline code!
 3. **Delegate Code Reviews to Your Custom Subagent (`.agents/agents/l400-code-reviewer.md`):**

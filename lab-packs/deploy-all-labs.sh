@@ -190,21 +190,39 @@ if dotenv_example.exists() and not (repo_root / "app" / "main.py").exists():
     if not dotenv_file.exists():
         dotenv_file.write_text(
             "# Auto-seeded by lab-packs/deploy-all-labs.sh (gitignored)\n"
-            f"GCP_REGION={reg}\n"
-            f"REGION={reg}\n"
+            f"PROJECT_ID={p1}\n"
+            f"GCP_PROJECT={p1}\n"
+            f"GCP_PROJECT_ID={p1}\n"
             f"P1_PROJECT_ID={p1}\n"
             f"P2_PROJECT_ID={p2}\n"
             f"P3_PROJECT_ID={p3}\n"
+            f"GCP_REGION={reg}\n"
+            f"REGION={reg}\n"
             "ENV=dev\n"
         )
     else:
         txt = dotenv_file.read_text()
-        for key in ("GCP_REGION", "REGION"):
+        always_updates = {
+            "P1_PROJECT_ID": p1,
+            "P2_PROJECT_ID": p2,
+            "P3_PROJECT_ID": p3,
+            "GCP_REGION": reg,
+            "REGION": reg,
+        }
+        for key, val in always_updates.items():
             if re.search(rf"^{key}=", txt, flags=re.M):
-                txt = re.sub(rf"^{key}=.*$", f"{key}={reg}", txt, flags=re.M)
+                txt = re.sub(rf"^{key}=.*$", f"{key}={val}", txt, flags=re.M)
             else:
-                txt = txt.rstrip("\n") + f"\n{key}={reg}\n"
-        dotenv_file.write_text(txt)
+                txt = txt.rstrip("\n") + f"\n{key}={val}\n"
+        for key in ("PROJECT_ID", "GCP_PROJECT", "GCP_PROJECT_ID"):
+            m = re.search(rf"^{key}=(.*)$", txt, flags=re.M)
+            if not m:
+                txt = txt.rstrip("\n") + f"\n{key}={p1}\n"
+            elif m.group(1).strip() in ("", "your-gcp-project-id") or m.group(1).strip().startswith("your-gcp-project-id"):
+                txt = re.sub(rf"^{key}=.*$", f"{key}={p1}", txt, flags=re.M)
+        if not re.search(r"^ENV=", txt, flags=re.M):
+            txt = txt.rstrip("\n") + "\nENV=dev\n"
+        dotenv_file.write_text(txt.rstrip("\n") + "\n")
 '
 
 if [[ -z "${BILLING_ACCOUNT}" ]]; then

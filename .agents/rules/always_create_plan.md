@@ -17,8 +17,8 @@ Every plan you present MUST contain the following six sections in order:
 3. **How You Want to Do It**
    - Step-by-step technical approach, including which Data Agent Kit (DAK) skills, MCP tools, CLI commands, and `.agents/rules/` standards will be used.
 4. **Files Expected to Change or Create**
-   - Explicit list of target file paths (e.g., `src/part1/...`, `docs/part2/...`, `PRD.md`, `.agents/rules/...`) and whether each will be created, modified, or deleted.
+   - Explicit list of target file paths (e.g., `src/part1/...`, `docs/part2/...`, `docs/part3/SPEC.md`, `.agents/rules/...`) and whether each will be created, modified, or deleted.
 5. **Regression Risk Analysis**
    - Assessment of potential risks (e.g., schema incompatibility, Gluten/Velox operator fallback, 1:N join fan-out, data overwrite, cost/runtime impact) and how you will mitigate and verify them.
 6. **Clarification Questions (If any)**
-   - Any open questions regarding underspecified requirements, missing parameters, or uncompleted `<!-- TODO (CE): ... -->` sections in `PRD.md` or `.agents/rules/`. If everything is clear, explicitly state *"None — ready to proceed upon your approval."*
+   - Any open questions regarding underspecified requirements, missing parameters, or uncompleted `<!-- TODO (CE): ... -->` sections in `docs/part3/{DISCOVERY,EDA,SPEC}.md` or `.agents/rules/`. If everything is clear, explicitly state *"None — ready to proceed upon your approval."*

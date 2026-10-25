@@ -3,7 +3,7 @@
 ## 0. Document Control, Architecture Overview & Step 04 Target File Tree
 ### 0.1 Specification Purpose & Traceability
 - **Upstream Inputs:** `docs/part3/DISCOVERY.md` & `docs/part3/EDA.md`
-- **Target Project, Region & Lifecycle Stage:** `<TODO: project_id>` • `us-central1` • `ENV = dev`
+- **Target Project, Region & Lifecycle Stage:** `<TODO: project_id>` • `<TODO: region (default: us-central1)>` • `ENV = dev`
 ### 0.2 End-to-End Medallion Lakehouse Architecture Diagram
 - (Provide a Mermaid flowchart showing Raw Landing -> Bronze Catalog -> Silver Catalog -> BigQuery External Registration -> Gold Feature Mart -> Knowledge Catalog & Composer)
 ### 0.3 Step 04 Target Workspace File Tree (`docs/part3/` & `src/part3/`)
