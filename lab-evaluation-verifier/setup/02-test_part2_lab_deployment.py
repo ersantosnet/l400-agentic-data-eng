@@ -43,7 +43,7 @@ def build_checks(project: str, region: str) -> list:
         c.check_apis(project, REQUIRED_APIS),
         c.check_network(project, region, "acme-part2-vpc", "acme-part2-subnet", "allow-spark-internal-part2"),
         c.check_service_account(project),
-        c.check_buckets(project, ["spark-event-logs", "lakehouse-warehouse", "nqe-audit-results"]),
+        c.check_buckets(project, ["spark-event-logs", "lakehouse-warehouse", "nqe-audit-results"], region),
         c.check_objects(project, "Pilot event logs, benchmark script & NQE JAR", seed_objects),
         c.check_composer(project, region, "acme-composer-part2"),
     ]

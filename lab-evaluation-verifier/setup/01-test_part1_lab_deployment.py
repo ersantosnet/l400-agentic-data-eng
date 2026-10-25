@@ -32,7 +32,7 @@ def build_checks(project: str, region: str) -> list:
         c.check_apis(project, REQUIRED_APIS),
         c.check_network(project, region, "acme-spark-vpc", "acme-spark-subnet", "allow-spark-internal"),
         c.check_service_account(project),
-        c.check_buckets(project, ["raw-landing", "lakehouse-warehouse", "spark-event-logs"]),
+        c.check_buckets(project, ["raw-landing", "lakehouse-warehouse", "spark-event-logs"], region),
         c.check_objects(project, "Seed scripts & event logs", [
             f"gs://{project}-lakehouse-warehouse/scripts/orders_enrichment.py",
             f"gs://{project}-spark-event-logs/current_event_log.json",

@@ -46,9 +46,9 @@ def build_checks(project: str, region: str) -> list:
         c.check_apis(project, REQUIRED_APIS),
         c.check_network(project, region, "acme-part3-vpc", "acme-part3-subnet", "allow-spark-internal-part3"),
         c.check_service_account(project),
-        c.check_buckets(project, ["raw-landing", "lakehouse-warehouse", "spark-event-logs"]),
+        c.check_buckets(project, ["raw-landing", "lakehouse-warehouse", "spark-event-logs"], region),
         c.check_object_count(project, "Raw landing feeds (v0.01, 5 feeds)", f"gs://{project}-raw-landing/v0.01/", 47, LANDING_FEEDS),
-        c.check_bq_datasets(project, ["fraud_detection_db", "fraud_features_gold"]),
+        c.check_bq_datasets(project, ["fraud_detection_db", "fraud_features_gold"], region),
         c.check_bq_connection(project, region, "lakehouse-vending-conn"),
         c.check_composer(project, region, "acme-composer-part3"),
     ]

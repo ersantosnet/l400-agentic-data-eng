@@ -22,11 +22,19 @@ P1_PROJECT=""
 P2_PROJECT=""
 P3_PROJECT=""
 BILLING_ACCOUNT=""
-REGION="us-central1"
+REGION="${GCP_REGION:-${REGION:-us-central1}}"
 TESTER_EMAIL=""
 SEED_MODE="fast"
 USE_GCLOUD=false
 SKIP_CONFIRM=false
+
+validate_region() {
+  local reg="${1:-}"
+  if [[ ! "${reg}" =~ ^[a-z]+-[a-z]+[0-9]{1,2}$ ]]; then
+    echo -e "${RED}[ERROR] Invalid GCP region '${reg}'. Expected format like 'us-central1', 'us-east4', or 'europe-west1'.${NC}"
+    exit 1
+  fi
+}
 
 usage() {
   cat <<EOF
@@ -82,6 +90,10 @@ while [[ $# -gt 0 ]]; do
       REGION="${1#*=}"
       shift
       ;;
+    --region)
+      REGION="${2:-}"
+      shift 2
+      ;;
     --tester-email=*)
       TESTER_EMAIL="${1#*=}"
       shift
@@ -110,6 +122,9 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+
+REGION="$(echo "${REGION}" | tr '[:upper:]' '[:lower:]')"
+validate_region "${REGION}"
 
 echo -e "\n${BOLD}${CYAN}================================================================================${NC}"
 echo -e "${BOLD}${CYAN}       ACME INC. — L400 MASTER LAB PROVISIONER (PARTS 1, 2 & 3 SEQUENTIAL)      ${NC}"
@@ -141,6 +156,56 @@ USER_LDAP="$(echo "${USER_LDAP}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0
 [[ -z "${P1_PROJECT}" ]] && P1_PROJECT="l400-agentic-de-p1-${USER_LDAP}"
 [[ -z "${P2_PROJECT}" ]] && P2_PROJECT="l400-agentic-de-p2-${USER_LDAP}"
 [[ -z "${P3_PROJECT}" ]] && P3_PROJECT="l400-agentic-de-p3-${USER_LDAP}"
+
+# Persist lab environment manifest in lab-packs/.lab-env.json (and seed gitignored ../.env if in student workspace)
+LAB_ENV_REGION="${REGION}" LAB_ENV_P1="${P1_PROJECT}" LAB_ENV_P2="${P2_PROJECT}" LAB_ENV_P3="${P3_PROJECT}" LAB_ENV_DIR="${SCRIPT_DIR}" python3 -c '
+import datetime, json, os, pathlib, re
+
+script_dir = pathlib.Path(os.environ["LAB_ENV_DIR"])
+reg = os.environ["LAB_ENV_REGION"]
+p1 = os.environ["LAB_ENV_P1"]
+p2 = os.environ["LAB_ENV_P2"]
+p3 = os.environ["LAB_ENV_P3"]
+
+env_json_path = script_dir / ".lab-env.json"
+payload = {}
+if env_json_path.exists():
+    try:
+        payload = json.loads(env_json_path.read_text())
+    except Exception:
+        payload = {}
+payload.update({
+    "region": reg,
+    "p1_project": p1,
+    "p2_project": p2,
+    "p3_project": p3,
+    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+})
+env_json_path.write_text(json.dumps(payload, indent=2) + "\n")
+
+repo_root = script_dir.parent
+dotenv_example = repo_root / ".env.example"
+dotenv_file = repo_root / ".env"
+if dotenv_example.exists() and not (repo_root / "app" / "main.py").exists():
+    if not dotenv_file.exists():
+        dotenv_file.write_text(
+            "# Auto-seeded by lab-packs/deploy-all-labs.sh (gitignored)\n"
+            f"GCP_REGION={reg}\n"
+            f"REGION={reg}\n"
+            f"P1_PROJECT_ID={p1}\n"
+            f"P2_PROJECT_ID={p2}\n"
+            f"P3_PROJECT_ID={p3}\n"
+            "ENV=dev\n"
+        )
+    else:
+        txt = dotenv_file.read_text()
+        for key in ("GCP_REGION", "REGION"):
+            if re.search(rf"^{key}=", txt, flags=re.M):
+                txt = re.sub(rf"^{key}=.*$", f"{key}={reg}", txt, flags=re.M)
+            else:
+                txt = txt.rstrip("\n") + f"\n{key}={reg}\n"
+        dotenv_file.write_text(txt)
+'
 
 if [[ -z "${BILLING_ACCOUNT}" ]]; then
   echo -e "  • Searching for available open billing account..."
@@ -263,6 +328,7 @@ printf "  %-28s | %-34s | %-10s\n" "Part 2: Qualification & ROI" "${P2_PROJECT}"
 printf "  %-28s | %-34s | %-10s\n" "Part 3: Medallion Lakehouse" "${P3_PROJECT}" "${P3_DURATION}s"
 echo -e "  -----------------------------+------------------------------------+-----------"
 echo -e "\n${BOLD}Evaluation Verifier Commands (Run from Cloned Repo Root After Completing Each Lab):${NC}"
-echo -e "  • ${CYAN}Part 1:${NC} cd lab-evaluation-verifier/part1 && ./run-all-evals.sh --project-id ${P1_PROJECT}"
-echo -e "  • ${CYAN}Part 2:${NC} cd lab-evaluation-verifier/part2 && ./run-all-evals.sh --project-id ${P2_PROJECT}"
-echo -e "  • ${CYAN}Part 3:${NC} cd lab-evaluation-verifier/part3 && ./run-all-evals.sh --project-id ${P3_PROJECT}\n"
+echo -e "  • ${CYAN}Setup :${NC} ./lab-evaluation-verifier/setup/run-all-evals.sh --region=${REGION} --p1-project=${P1_PROJECT} --p2-project=${P2_PROJECT} --p3-project=${P3_PROJECT}"
+echo -e "  • ${CYAN}Part 1:${NC} ./lab-evaluation-verifier/part1/run-all-evals.sh --project-id ${P1_PROJECT} --region ${REGION}"
+echo -e "  • ${CYAN}Part 2:${NC} ./lab-evaluation-verifier/part2/run-all-evals.sh --project-id ${P2_PROJECT} --region ${REGION}"
+echo -e "  • ${CYAN}Part 3:${NC} ./lab-evaluation-verifier/part3/run-all-evals.sh --project-id ${P3_PROJECT} --region ${REGION}\n"
