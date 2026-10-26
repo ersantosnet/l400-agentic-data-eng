@@ -51,6 +51,26 @@ def main():
     if not has_proj_flag and project_id and project_id != "unknown":
         forward_args = ["--project-id", project_id] + forward_args
 
+    force_manual = "--manual" in forward_args or os.environ.get("MANUAL") == "1"
+    no_submit = "--no-submit" in forward_args or os.environ.get("NO_SUBMIT") == "1"
+    validator_url = os.environ.get(
+        "VALIDATOR_URL",
+        os.environ.get("URL", ec.DEFAULT_VALIDATOR_URL),
+    )
+    student_account, student_ldap, token, auth_account = ec.resolve_submission_identity(
+        validator_url, force_manual=force_manual, no_submit=no_submit
+    )
+    child_env = os.environ.copy()
+    child_env["EVAL_TOKEN_CHECKED"] = "1"
+    if token:
+        child_env["EVAL_VALIDATOR_TOKEN"] = token
+    if auth_account:
+        child_env["EVAL_VALIDATOR_ACCOUNT"] = auth_account
+    if student_ldap:
+        child_env.setdefault("STUDENT_LDAP", student_ldap)
+    if student_account:
+        child_env.setdefault("STUDENT_IDENTITY", student_account)
+
     results = []
     for script in scripts:
         script_name = os.path.basename(script)
@@ -60,7 +80,7 @@ def main():
         t0 = time.time()
         cmd = [sys.executable, script] + forward_args
         try:
-            ret_code = subprocess.run(cmd, stdin=subprocess.DEVNULL, timeout=300).returncode
+            ret_code = subprocess.run(cmd, stdin=subprocess.DEVNULL, timeout=300, env=child_env).returncode
         except subprocess.TimeoutExpired:
             ret_code = 124
         elapsed = time.time() - t0

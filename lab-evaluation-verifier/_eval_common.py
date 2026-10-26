@@ -163,20 +163,23 @@ def resolve_gcp_context(
     argv: list[str] | None = None,
     fallback_default_project: bool = False,
 ) -> tuple[str, str, str]:
-    """Resolves (project_id, dataset, region) consistently across all evaluators.
+    """Resolves (project_id, dataset, region) with strict multi-source precedence:
 
-    Precedence:
-      1. CLI flags (--project-id / --project / --p{N}-project, --region)
-      2. Process env vars (P{N}_PROJECT_ID -> PROJECT_ID -> GCP_PROJECT -> GOOGLE_CLOUD_PROJECT;
-         BIGQUERY_DATASET; REGION -> GCP_REGION)
-      3. When not is_strict_gcs_only():
-         a. .lab-env.json (p{N}_project / project_id, region)
-         b. Un-sourced .env file (P{N}_PROJECT_ID / PROJECT_ID / GCP_PROJECT, BIGQUERY_DATASET, REGION / GCP_REGION)
+      1. CLI flags (--project-id, --project, --p{N}-project, --region)
+      2. Part-specific process env var (P{N}_PROJECT_ID; BIGQUERY_DATASET; REGION -> GCP_REGION)
+      3. When not is_strict_gcs_only() and part_num in (1, 2, 3):
+         a. Part-specific .lab-env.json (p{N}_project, or project_id in lab-packs/part{N}-*/.lab-env.json)
+         b. Part-specific un-sourced .env file (P{N}_PROJECT_ID)
+         c. Part-specific lab-packs/part{N}-*/terraform/terraform.tfvars (project_id, region)
+      4. Generic process env vars (PROJECT_ID -> GCP_PROJECT -> GCP_PROJECT_ID -> GOOGLE_CLOUD_PROJECT)
+      5. When not is_strict_gcs_only():
+         a. Generic .lab-env.json (project_id when no p1/p2/p3_project keys exist, region)
+         b. Generic un-sourced .env file (PROJECT_ID / GCP_PROJECT, BIGQUERY_DATASET, REGION / GCP_REGION)
          c. agent-config.json (gcp-project-id, bigquery-dataset, primary-region / bigquery-region / ...)
-         d. Unconditional terraform.tfvars scan (project_id if unset, region if unset)
-      4. Fallback project_id: l400-agentic-de-p{N}-$USER (when fallback_default_project=True)
+         d. Generic terraform/terraform.tfvars scan (project_id if unset, region if unset)
+      6. Fallback project_id: l400-agentic-de-p{N}-$USER (when fallback_default_project=True)
          or `gcloud config get-value project`
-      5. Region validated against GCP_REGION_REGEX (defaults to 'us-central1').
+      7. Region validated against GCP_REGION_REGEX (defaults to 'us-central1').
     """
     apply_default_gcp_env()
     args = argv if argv is not None else sys.argv[1:]
@@ -202,29 +205,29 @@ def resolve_gcp_context(
     if cli_region:
         validate_region(cli_region)
 
-    env_project = ""
+    part_env_project = ""
     if part_num in (1, 2, 3):
-        env_project = (os.environ.get(f"P{part_num}_PROJECT_ID") or "").strip()
-    if not env_project:
-        env_project = (
-            os.environ.get("PROJECT_ID")
-            or os.environ.get("GCP_PROJECT")
-            or os.environ.get("GCP_PROJECT_ID")
-            or os.environ.get("GOOGLE_CLOUD_PROJECT")
-            or ""
-        ).strip()
+        part_env_project = (os.environ.get(f"P{part_num}_PROJECT_ID") or "").strip()
+
+    generic_env_project = (
+        os.environ.get("PROJECT_ID")
+        or os.environ.get("GCP_PROJECT")
+        or os.environ.get("GCP_PROJECT_ID")
+        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or ""
+    ).strip()
 
     dataset = (os.environ.get("BIGQUERY_DATASET") or "").strip()
     env_region = (os.environ.get("REGION") or os.environ.get("GCP_REGION") or "").strip()
 
-    project_id = cli_project or env_project
+    project_id = cli_project or part_env_project
     region = cli_region or env_region
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     script_dir = os.path.dirname(os.path.abspath(script_file)) if script_file else os.path.dirname(os.path.abspath(__file__))
 
     if not is_strict_gcs_only(args):
-        # 3a. .lab-env.json lookup
+        # 3a. Part-specific .lab-env.json & .env & terraform.tfvars lookup BEFORE generic PROJECT_ID env var
         lab_env_candidates: list[str] = [
             ".lab-env.json",
             "../.lab-env.json",
@@ -235,16 +238,105 @@ def resolve_gcp_context(
             os.path.join(repo_root, ".lab-env.json"),
             os.path.join(repo_root, "lab-packs/.lab-env.json"),
         ]
+        part_lab_env_candidates: list[str] = []
         if part_num in (1, 2, 3):
             for match in sorted(glob.glob(f"lab-packs/part{part_num}-*/.lab-env.json")):
                 if "-solution" not in match:
-                    lab_env_candidates.append(match)
+                    part_lab_env_candidates.append(match)
             for match in sorted(glob.glob(os.path.join(repo_root, f"lab-packs/part{part_num}-*/.lab-env.json"))):
                 if "-solution" not in match:
-                    lab_env_candidates.append(match)
+                    part_lab_env_candidates.append(match)
 
+        dotenv_candidates = [
+            ".env",
+            "../.env",
+            "../../.env",
+            os.path.join(repo_root, ".env"),
+        ]
+
+        if part_num in (1, 2, 3) and not project_id:
+            seen_part_le: set[str] = set()
+            for le_path in lab_env_candidates + part_lab_env_candidates:
+                abs_p = os.path.abspath(le_path)
+                if abs_p in seen_part_le or not os.path.isfile(abs_p):
+                    continue
+                seen_part_le.add(abs_p)
+                try:
+                    with open(abs_p, "r", encoding="utf-8") as f:
+                        le_data = json.load(f)
+                    if not isinstance(le_data, dict):
+                        continue
+                    p_val = str(le_data.get(f"p{part_num}_project") or "").strip()
+                    if p_val:
+                        project_id = p_val
+                    elif le_path in part_lab_env_candidates:
+                        generic_p = str(le_data.get("project_id") or "").strip()
+                        if generic_p:
+                            project_id = generic_p
+                    if not region:
+                        r_val = str(le_data.get("region") or "").strip()
+                        if r_val:
+                            region = r_val
+                    if project_id:
+                        break
+                except Exception:
+                    pass
+
+        if part_num in (1, 2, 3):
+            seen_part_de: set[str] = set()
+            for de_path in dotenv_candidates:
+                abs_p = os.path.abspath(de_path)
+                if abs_p in seen_part_de or not os.path.isfile(abs_p):
+                    continue
+                seen_part_de.add(abs_p)
+                de_vars = parse_dotenv_file(abs_p)
+                if not de_vars:
+                    continue
+                if not dataset and de_vars.get("BIGQUERY_DATASET"):
+                    dataset = de_vars["BIGQUERY_DATASET"]
+                if not region:
+                    region = de_vars.get("REGION") or de_vars.get("GCP_REGION") or ""
+                if not project_id and de_vars.get(f"P{part_num}_PROJECT_ID"):
+                    project_id = de_vars[f"P{part_num}_PROJECT_ID"].strip()
+                if project_id and region and dataset:
+                    break
+
+        if part_num in (1, 2, 3) and not project_id:
+            part_tfvars_candidates: list[str] = []
+            for match in sorted(glob.glob(f"lab-packs/part{part_num}-*/terraform/terraform.tfvars")):
+                if "-solution" not in match:
+                    part_tfvars_candidates.append(match)
+            for match in sorted(glob.glob(os.path.join(repo_root, f"lab-packs/part{part_num}-*/terraform/terraform.tfvars"))):
+                if "-solution" not in match:
+                    part_tfvars_candidates.append(match)
+            seen_part_tf: set[str] = set()
+            for tfvars_path in part_tfvars_candidates:
+                abs_p = os.path.abspath(tfvars_path)
+                if abs_p in seen_part_tf or not os.path.isfile(abs_p):
+                    continue
+                seen_part_tf.add(abs_p)
+                try:
+                    with open(abs_p, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    m_proj = re.search(r'project_id\s*=\s*"([^"]+)"', content)
+                    if m_proj and m_proj.group(1) and "your-" not in m_proj.group(1):
+                        project_id = m_proj.group(1).strip()
+                    if not region:
+                        m_reg = re.search(r'region\s*=\s*"([^"]+)"', content)
+                        if m_reg and m_reg.group(1):
+                            region = m_reg.group(1).strip()
+                    if project_id:
+                        break
+                except Exception:
+                    pass
+
+        # 4. Generic process env vars (PROJECT_ID, GCP_PROJECT, etc.)
+        if not project_id and generic_env_project:
+            project_id = generic_env_project
+
+        # 5a. Generic .lab-env.json lookup
         seen_paths: set[str] = set()
-        for le_path in lab_env_candidates:
+        for le_path in lab_env_candidates + part_lab_env_candidates:
             abs_p = os.path.abspath(le_path)
             if abs_p in seen_paths or not os.path.isfile(abs_p):
                 continue
@@ -275,13 +367,7 @@ def resolve_gcp_context(
             except Exception:
                 pass
 
-        # 3b. Un-sourced .env file lookup
-        dotenv_candidates = [
-            ".env",
-            "../.env",
-            "../../.env",
-            os.path.join(repo_root, ".env"),
-        ]
+        # 5b. Un-sourced .env file lookup
         for de_path in dotenv_candidates:
             abs_p = os.path.abspath(de_path)
             if abs_p in seen_paths or not os.path.isfile(abs_p):
@@ -306,7 +392,7 @@ def resolve_gcp_context(
             if not region:
                 region = de_vars.get("REGION") or de_vars.get("GCP_REGION") or ""
 
-        # 3c. agent-config.json lookup
+        # 5c. agent-config.json lookup
         cfg_candidates = [
             "agent-config.json",
             "../agent-config.json",
@@ -335,7 +421,7 @@ def resolve_gcp_context(
             except Exception:
                 pass
 
-        # 3d. Unconditional terraform.tfvars scan (runs whenever project_id OR region is still unset)
+        # 5d. Unconditional terraform.tfvars scan (runs whenever project_id OR region is still unset)
         if not project_id or not region:
             tfvars_candidates: list[str] = [
                 "terraform/terraform.tfvars",
@@ -370,6 +456,9 @@ def resolve_gcp_context(
                             region = m_reg.group(1).strip()
                 except Exception:
                     pass
+    else:
+        if not project_id and generic_env_project:
+            project_id = generic_env_project
 
     if not project_id or project_id == "null":
         if fallback_default_project and part_num in (1, 2, 3):
@@ -455,6 +544,8 @@ def get_identity_token() -> tuple[str, str]:
     preferred_validator_acc = os.environ.get("EVAL_VALIDATOR_ACCOUNT", "").strip()
     if pre_minted_tok:
         return pre_minted_tok, (preferred_validator_acc or "pre-minted@google.com")
+    if os.environ.get("EVAL_TOKEN_CHECKED") == "1":
+        return "", ""
 
     token_env = build_validator_token_env()
     fast_candidates: list[str] = []
@@ -571,8 +662,9 @@ def get_student_identity(preferred_auth_account: str = "") -> tuple[str, str]:
         or os.environ.get("STUDENT_LDAP")
         or ""
     ).strip()
+    explicit_identity = os.environ.get("STUDENT_IDENTITY", "").strip()
     if explicit_ldap:
-        acct = preferred_auth_account or (
+        acct = preferred_auth_account or explicit_identity or (
             explicit_ldap if "@" in explicit_ldap else f"{explicit_ldap}@google.com"
         )
         return acct, extract_ldap(explicit_ldap)

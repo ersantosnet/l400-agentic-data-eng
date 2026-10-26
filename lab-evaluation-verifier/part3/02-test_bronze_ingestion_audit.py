@@ -17,6 +17,7 @@ import urllib.request
 import urllib.error
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -133,17 +134,15 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
         sys.exit(1)
 
     print(f"Querying 5 Bronze tables in {project_id}:{dataset}...")
-    bronze_results = {}
 
-    for dom in DOMAINS:
+    def _inspect_bronze_domain(dom: str) -> tuple[str, dict]:
         tbl = f"{dom}_bronze"
         rc, meta, err = ec.run_bq_show_json(project_id, f"{project_id}:{dataset}.{tbl}")
         if rc != 0 or not meta:
-            bronze_results[tbl] = {
+            return tbl, {
                 "exists": False,
                 "error": err or "Table not found",
             }
-            continue
 
         cols = [f.get("name") for f in meta.get("schema", {}).get("fields", []) if isinstance(f, dict)]
         has_audit_cols = ("_ingestion_timestamp" in cols) and ("_source_file" in cols)
@@ -154,7 +153,7 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
             sql = f"SELECT COUNT(*) AS cnt, -1 AS ts_cnt, -1 AS src_cnt FROM `{project_id}.{dataset}.{tbl}`"
 
         q_res = run_bq_query(project_id, sql, region=region)
-        bronze_results[tbl] = {
+        return tbl, {
             "exists": True,
             "columns": cols,
             "has_audit_columns": has_audit_cols,
@@ -162,7 +161,14 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
             "row_and_audit_counts": q_res,
         }
 
-    runtime_advisory = check_latest_batch_runtime_advisory(project_id, region, "Bronze")
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        dom_futures = {dom: pool.submit(_inspect_bronze_domain, dom) for dom in DOMAINS}
+        advisory_future = pool.submit(check_latest_batch_runtime_advisory, project_id, region, "Bronze")
+        bronze_results = {}
+        for dom in DOMAINS:
+            tbl, info = dom_futures[dom].result()
+            bronze_results[tbl] = info
+        runtime_advisory = advisory_future.result()
 
     telemetry = {
         "project_id": project_id,

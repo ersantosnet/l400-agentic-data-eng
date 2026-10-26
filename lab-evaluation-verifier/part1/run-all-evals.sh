@@ -37,7 +37,7 @@ import os, sys
 sys.path.insert(0, os.path.abspath(os.path.join(sys.argv[1], "..")))
 import _eval_common as ec
 p, _, r = ec.resolve_gcp_context(part_num=1, script_file=sys.argv[1] + "/run-all-evals.py", argv=sys.argv[2:])
-print(f"{p or \"unknown\"} {r}")
+print(p or "unknown", r)
 ' "${DIR}" "$@"
 ) || exit 1
 

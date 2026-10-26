@@ -18,6 +18,7 @@ import urllib.request
 import urllib.error
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -159,17 +160,15 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
         sys.exit(1)
 
     print(f"Querying 5 Silver tables in {project_id}:{dataset}...")
-    silver_results = {}
 
-    for dom, spec in SILVER_TABLE_SPECS.items():
+    def _inspect_silver_domain(dom: str, spec: dict) -> tuple[str, dict]:
         tbl = f"{dom}_silver"
         rc, meta, err = ec.run_bq_show_json(project_id, f"{project_id}:{dataset}.{tbl}")
         if rc != 0 or not meta:
-            silver_results[tbl] = {
+            return tbl, {
                 "exists": False,
                 "error": err or "Table not found",
             }
-            continue
 
         cols = [f.get("name") for f in meta.get("schema", {}).get("fields", []) if isinstance(f, dict)]
         p_col = spec["primary_col"]
@@ -195,14 +194,24 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
         FROM `{project_id}.{dataset}.{tbl}`
         """
         q_res = run_bq_query(project_id, sql, region=region)
-        silver_results[tbl] = {
+        return tbl, {
             "exists": True,
             "columns": cols,
             "table_metadata": meta,
             "metrics": q_res,
         }
 
-    runtime_advisory = check_latest_batch_runtime_advisory(project_id, region, "Silver")
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        dom_futures = {
+            dom: pool.submit(_inspect_silver_domain, dom, spec)
+            for dom, spec in SILVER_TABLE_SPECS.items()
+        }
+        advisory_future = pool.submit(check_latest_batch_runtime_advisory, project_id, region, "Silver")
+        silver_results = {}
+        for dom in SILVER_TABLE_SPECS:
+            tbl, info = dom_futures[dom].result()
+            silver_results[tbl] = info
+        runtime_advisory = advisory_future.result()
 
     telemetry = {
         "project_id": project_id,
