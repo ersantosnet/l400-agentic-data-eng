@@ -1210,6 +1210,22 @@ def get_access_token_safe() -> str:
     return ""
 
 
+def gcp_api_get(url: str, access_token: str, quota_project: str = "", timeout: int = 20) -> tuple[int, dict]:
+    """Calls a GCP REST API GET endpoint and returns (status_code, parsed_json)."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if quota_project:
+        headers["x-goog-user-project"] = quota_project
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, safe_json_loads(resp.read().decode("utf-8"), {})
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8") if e.fp else str(e)
+        return e.code, safe_json_loads(err_body, {"error": err_body})
+    except Exception as e:
+        return 0, {"error": str(e)}
+
+
 def decompress_event_log_bytes(
     raw_bytes: bytes,
     uri: str = "",

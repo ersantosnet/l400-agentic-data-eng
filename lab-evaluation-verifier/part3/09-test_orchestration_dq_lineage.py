@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
 """
-Lab Evaluation: L400-da-data-engineering-part3 - governance_composer_lineage
-Verifies staged Cloud Composer 3 DAG (medallion_lakehouse_dag.py), Policy Tags on Bronze ssn columns,
-Dataplex Knowledge Catalog Aspect Type (medallion-governance-template), Data Mesh (FraudDomain / FraudRiskFeatureStore),
-Auto Data Quality scan, and OpenLineage processes.
+Lab Evaluation: L400-da-data-engineering-part3 - orchestration_dq_lineage (Phase 7c)
+Verifies staged Cloud Composer 3 DAG (medallion_lakehouse_dag.py),
+Dataplex Auto Data Quality scan (fraud-gold-dq-scan-dev),
+and OpenLineage / Dataplex Data Lineage processes across regional and multi-regional endpoints.
 Supports both Automatic submission (local proxy / Cloud Run validator) and Manual submission (web upload).
 """
 
 import os
-import re
 import sys
 import json
-import uuid
-import hashlib
 import zipfile
 import subprocess
-import urllib.request
-import urllib.error
-import ssl
 import time
 from datetime import datetime, timezone
 
@@ -25,7 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import _eval_common as ec
 
 LAB = "L400-agentic-data-eng"
-EVAL_NAME = "part3_governance_composer_lineage"
+EVAL_NAME = "part3_orchestration_dq_lineage"
 ZIP_FILENAME = f"{EVAL_NAME}.zip"
 DEFAULT_VALIDATOR_URL = os.environ.get(
     "VALIDATOR_URL",
@@ -40,6 +34,7 @@ safe_json_loads = ec.safe_json_loads
 calculate_signature = ec.calculate_signature
 get_identity_token = ec.get_identity_token
 get_access_token = ec.get_access_token_safe
+api_get = ec.gcp_api_get
 submit_bundle = ec.submit_bundle
 print_manual_instructions = ec.print_manual_instructions
 
@@ -53,24 +48,8 @@ def get_gcp_context() -> tuple[str, str, str]:
     )
 
 
-def api_get(url: str, access_token: str, quota_project: str = "") -> tuple[int, dict]:
-    """Calls a GCP REST API GET endpoint and returns (status_code, parsed_json)."""
-    headers = {"Authorization": f"Bearer {access_token}"}
-    if quota_project:
-        headers["x-goog-user-project"] = quota_project
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return resp.status, safe_json_loads(resp.read().decode("utf-8"), {})
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8") if e.fp else str(e)
-        return e.code, safe_json_loads(err_body, {"error": err_body})
-    except Exception as e:
-        return 0, {"error": str(e)}
-
-
 def create_bundle(output_zip_path: str, student_account: str, student_ldap: str):
-    """Collects Composer DAG, Bronze Policy Tag metadata, Dataplex KC Aspect/Mesh, DQ Scans, and Lineage."""
+    """Collects Composer DAG, Dataplex Auto DQ Scans, and OpenLineage processes."""
     project_id, dataset, region = get_gcp_context()
     if not project_id:
         print("Error: Could not determine PROJECT_ID.")
@@ -80,7 +59,7 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
     warehouse_bucket = f"gs://{project_id}-lakehouse-warehouse"
     dag_gcs_uri = f"{warehouse_bucket}/dags/medallion_lakehouse_dag.py"
 
-    print(f"Checking Composer DAG, Policy Tags, Dataplex KC, DQ Scans, and Lineage in {project_id}...")
+    print(f"Checking Composer DAG, Dataplex Auto DQ Scans, and Data Lineage in {project_id}...")
 
     # 1. Staged Composer DAG
     dag_ls = subprocess.run(
@@ -126,59 +105,14 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
                 except Exception:
                     pass
 
-    # 2. Bronze Policy Tags on ssn columns
-    bronze_policy_tags = {}
-    for tbl in ("customers_crm_bronze", "payment_transactions_bronze"):
-        rc, meta, err_msg = ec.run_bq_show_json(project_id, f"{project_id}:fraud_detection_db.{tbl}")
-        if rc == 0 and meta:
-            ssn_field = next((f for f in meta.get("schema", {}).get("fields", []) if isinstance(f, dict) and f.get("name") == "ssn"), {})
-            ptags = ssn_field.get("policyTags", {}).get("names", []) if isinstance(ssn_field, dict) else []
-            bronze_policy_tags[tbl] = {
-                "exists": True,
-                "ssn_policy_tags": ptags,
-                "has_policy_tag": len(ptags) > 0,
-            }
-        else:
-            bronze_policy_tags[tbl] = {
-                "exists": False,
-                "ssn_policy_tags": [],
-                "has_policy_tag": False,
-                "error": err_msg or "Table not found",
-            }
-
-    # 3. Dataplex Knowledge Catalog Aspect Type & Gold Entry Aspects
-    asp_code, asp_resp = api_get(
-        f"https://dataplex.googleapis.com/v1/projects/{project_id}/locations/{region}/aspectTypes/medallion-governance-template",
-        access_token,
-        project_id,
-    )
-    ent_code, gold_ent = api_get(
-        f"https://dataplex.googleapis.com/v1/projects/{project_id}/locations/{region}/entryGroups/@bigquery/entries/"
-        f"bigquery.googleapis.com/projects/{project_id}/datasets/fraud_features_gold/tables/gold_fraud_features?view=ALL",
-        access_token,
-        project_id,
-    )
-
-    # 4. Dataplex Lakes & Data Products
-    lakes_code, lakes_resp = api_get(
-        f"https://dataplex.googleapis.com/v1/projects/{project_id}/locations/{region}/lakes",
-        access_token,
-        project_id,
-    )
-    dp_code, dp_resp = api_get(
-        f"https://dataplex.googleapis.com/v1/projects/{project_id}/locations/{region}/dataProducts",
-        access_token,
-        project_id,
-    )
-
-    # 5. Dataplex Auto Data Quality Scans
+    # 2. Dataplex Auto Data Quality Scans
     scans_code, scans_resp = api_get(
         f"https://dataplex.googleapis.com/v1/projects/{project_id}/locations/{region}/dataScans",
         access_token,
         project_id,
     )
 
-    # 6. Data Lineage Processes (poll regional + continent multi-regional location)
+    # 3. Data Lineage Processes (poll regional + continent multi-regional location)
     lineage_processes = {}
     multi_loc = "eu" if region.startswith("europe-") else "us"
     for loc in dict.fromkeys([region, multi_loc, "us"]):
@@ -200,23 +134,6 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
             "gcs_uri": dag_gcs_uri,
             "staged_in_gcs": dag_staged_in_gcs,
         },
-        "bronze_policy_tags": bronze_policy_tags,
-        "aspect_type": {
-            "status_code": asp_code,
-            "response": asp_resp,
-        },
-        "gold_dataplex_entry": {
-            "status_code": ent_code,
-            "response": gold_ent,
-        },
-        "dataplex_lakes": {
-            "status_code": lakes_code,
-            "response": lakes_resp,
-        },
-        "dataplex_data_products": {
-            "status_code": dp_code,
-            "response": dp_resp,
-        },
         "dataplex_data_scans": {
             "status_code": scans_code,
             "response": scans_resp,
@@ -233,12 +150,12 @@ def create_bundle(output_zip_path: str, student_account: str, student_ldap: str)
         "created_at": created_at,
         "student_ldap": student_ldap,
         "workstation_account": student_account,
-        "signature": signature
+        "signature": signature,
     }
 
     with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest_data, indent=2))
-        z.writestr("governance_composer_lineage.json", json.dumps(telemetry, indent=2))
+        z.writestr("orchestration_dq_lineage.json", json.dumps(telemetry, indent=2))
         if dag_content:
             z.writestr("medallion_lakehouse_dag.py", dag_content)
 
